@@ -11,8 +11,10 @@ namespace fourcolor
 
         nonlinear.prepare (sampleRate, maxBlockSize, channels);
         tone.prepare (sampleRate, channels);
+        behavior.prepare (sampleRate, index);
 
         cleanBuffer.setSize (channels, maxBlockSize);
+        behaviorMod.setSize (1, maxBlockSize);
 
         //  Sized for the worst oversampler latency plus interpolation headroom.
         cleanDelay.setMaximumDelayInSamples ((int) std::ceil (nonlinear.getMaxLatencySamples()) + 8);
@@ -34,6 +36,7 @@ namespace fourcolor
     {
         nonlinear.reset();
         tone.reset();
+        behavior.reset();
         cleanDelay.reset();
         cleanBuffer.clear();
 
@@ -57,6 +60,7 @@ namespace fourcolor
         nonlinear.setColor (s.color);
         driveSmoothed.setTargetValue (s.drivePercent);
         tone.setTone (s.tone, s.centreHz);
+        behavior.setBehavior (s.behavior);
 
         levelGain.setTargetValue (juce::Decibels::decibelsToGain (s.levelDb));
         mixSmoothed.setTargetValue (s.bandMix);
@@ -96,6 +100,15 @@ namespace fourcolor
             }
         }
 
+        //  Behavior modulation from the CLEAN band input (before tone or
+        //  drive), one stereo-linked curve shared by both channels.
+        const float* modPtrs[2] = { nullptr, nullptr };
+        if (behavior.isActive())
+        {
+            behavior.writeModulation (buffer, behaviorMod.getWritePointer (0), n);
+            modPtrs[0] = modPtrs[1] = behaviorMod.getReadPointer (0);
+        }
+
         //  Drive is smoothed at block granularity: the engines' curves are
         //  continuous in drive, so 32-512 sample steps of a smoothed value
         //  stay click-free (asserted by the automation test).
@@ -103,7 +116,7 @@ namespace fourcolor
 
         //  Wet path: pre-tone -> oversampled colour -> post-tone.
         tone.processPre (buffer);
-        nonlinear.process (buffer);
+        nonlinear.process (buffer, behavior.isActive() ? modPtrs : nullptr);
         tone.processPost (buffer);
 
         //  Mix / level / mute / bypass / solo, all with per-sample fades.

@@ -1322,6 +1322,267 @@ static void testQualitySwitchDuringPlayback()
 }
 
 // ================================================================================
+// Phase 5 — Behavior (BODY <-> ATTACK)
+// ================================================================================
+namespace
+{
+    //  A synthetic kick: pitch drop 120 -> 50 Hz, exponential amplitude decay,
+    //  one hit per 250 ms.
+    float kickSample (int i, double sr)
+    {
+        const int period = (int) (0.25 * sr);
+        const int t = i % period;
+        const double sec = t / sr;
+        const double freq = 50.0 + 70.0 * std::exp (-sec * 30.0);
+        const double phase = 2.0 * MathConstants<double>::pi * (50.0 * sec + (70.0 / 30.0) * (1.0 - std::exp (-sec * 30.0)));
+        juce::ignoreUnused (freq);
+        return (float) (0.8 * std::exp (-sec * 12.0) * std::sin (phase));
+    }
+
+    struct AttackBodyMeasure
+    {
+        double attack;        // peak level of the attack window
+        double body;          // RMS of the body window
+        double attackCrunch;  // derivative-energy ratio of the attack window:
+                              // how much harmonic "edge" the hit carries
+    };
+
+    //  Run a kick train through one band processor and measure the attack
+    //  window (0-15 ms) and body window (40-150 ms) of each hit. Driving a
+    //  transient harder into a saturator COMPRESSES its peak, so ATTACK is
+    //  audible as crunch (upper harmonics on the hit), not as extra level -
+    //  hence the derivative-energy measure.
+    AttackBodyMeasure measureKickTrain (float behaviorAmount)
+    {
+        const double sr = 48000.0;
+        const int block = 512;
+
+        BandProcessor band;
+        band.prepare (sr, block, 1, 0);
+        band.setQuality (Quality::high);
+
+        BandProcessor::Settings s;
+        s.color = ColorType::warm;
+        s.drivePercent = 70.0f;
+        s.behavior = behaviorAmount;
+        s.centreHz = 60.0f;
+        band.setSettings (s);
+
+        const int period = (int) (0.25 * sr);
+        const int total = period * 8;
+        const int latency = (int) std::round (band.getLatencySamples());
+
+        std::vector<float> out;
+        out.reserve ((size_t) total);
+
+        AudioBuffer<float> buf (1, block);
+        for (int start = 0; start < total; start += block)
+        {
+            auto* d = buf.getWritePointer (0);
+            for (int i = 0; i < block; ++i)
+                d[i] = kickSample (start + i, sr);
+
+            band.setSettings (s);
+            band.process (buf);
+
+            for (int i = 0; i < block; ++i)
+                out.push_back (buf.getSample (0, i));
+        }
+
+        //  Skip the first two hits (detector settling), align by latency.
+        AttackBodyMeasure m { 0.0, 0.0, 0.0 };
+        int hits = 0;
+        for (int h = 2; h < 8; ++h)
+        {
+            const int hitStart = h * period + latency;
+            double atk = 0.0, body = 0.0, diffSq = 0.0, sq = 0.0;
+            const int atkEnd = (int) (0.015 * sr), bodyStart = (int) (0.040 * sr), bodyEnd = (int) (0.150 * sr);
+
+            for (int i = 0; i < atkEnd; ++i)
+            {
+                const double v = out[(size_t) (hitStart + i)];
+                atk = jmax (atk, std::abs (v));
+                sq += v * v;
+                if (i > 0)
+                {
+                    const double d = v - out[(size_t) (hitStart + i - 1)];
+                    diffSq += d * d;
+                }
+            }
+            for (int i = bodyStart; i < bodyEnd; ++i)
+                body += (double) out[(size_t) (hitStart + i)] * out[(size_t) (hitStart + i)];
+
+            m.attack       += atk;
+            m.body         += std::sqrt (body / (bodyEnd - bodyStart));
+            m.attackCrunch += std::sqrt (diffSq / jmax (1.0e-12, sq));
+            ++hits;
+        }
+
+        m.attack       /= hits;
+        m.body         /= hits;
+        m.attackCrunch /= hits;
+        return m;
+    }
+}
+
+static void testBehaviorAttackVsBody()
+{
+    section ("Phase 5: BODY vs ATTACK are different behaviours");
+
+    const auto body    = measureKickTrain (-1.0f);
+    const auto neutral = measureKickTrain (0.0f);
+    const auto attack  = measureKickTrain (+1.0f);
+
+    std::printf ("      attack crunch: BODY %.4f, neutral %.4f, ATTACK %.4f\n",
+                 body.attackCrunch, neutral.attackCrunch, attack.attackCrunch);
+    std::printf ("      body RMS:      BODY %.4f, neutral %.4f, ATTACK %.4f\n",
+                 body.body, neutral.body, attack.body);
+
+    //  ATTACK distorts the hit harder than BODY: clearly more edge (derivative
+    //  energy) in the attack window, monotone across the range.
+    const double crunchGapDb = Decibels::gainToDecibels (attack.attackCrunch / body.attackCrunch);
+    check (crunchGapDb > 1.5, "ATTACK puts >1.5 dB more crunch on the hit than BODY ("
+                                  + String (crunchGapDb, 2) + " dB)");
+    check (attack.attackCrunch >= neutral.attackCrunch * 0.98
+               && neutral.attackCrunch >= body.attackCrunch * 0.98,
+           "crunch is monotone from BODY through neutral to ATTACK");
+
+    //  And it must NOT be a volume knob: overall body level within 3 dB.
+    const double bodyShift = std::abs (Decibels::gainToDecibels (attack.body / body.body));
+    check (bodyShift < 3.0, "sustain level shift between extremes is bounded ("
+                                + String (bodyShift, 2) + " dB)");
+}
+
+static void testBehaviorNoPumpingOnSustained()
+{
+    section ("Phase 5: no pumping on sustained material");
+
+    //  On a steady sine the transient measure decays to ~0, so Behavior at
+    //  either extreme must barely change the steady-state level.
+    const double sr = 48000.0;
+    const int block = 512;
+
+    auto steadyRms = [&] (float behaviorAmount)
+    {
+        BandProcessor band;
+        band.prepare (sr, block, 1, 1);
+        band.setQuality (Quality::high);
+
+        BandProcessor::Settings s;
+        s.color = ColorType::iron;
+        s.drivePercent = 60.0f;
+        s.behavior = behaviorAmount;
+        s.centreHz = 400.0f;
+        band.setSettings (s);
+
+        AudioBuffer<float> buf (1, block);
+        double sq = 0.0; int counted = 0;
+        int sampleIndex = 0;
+
+        for (int blk = 0; blk < 120; ++blk)
+        {
+            auto* d = buf.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                d[i] = 0.35f * (float) std::sin (2.0 * MathConstants<double>::pi * 400.0 * sampleIndex / sr);
+
+            band.setSettings (s);
+            band.process (buf);
+
+            if (blk >= 60)
+            {
+                for (int i = 0; i < block; ++i)
+                    sq += (double) buf.getSample (0, i) * buf.getSample (0, i);
+                counted += block;
+            }
+        }
+        return std::sqrt (sq / counted);
+    };
+
+    const double neutral = steadyRms (0.0f);
+    const double bodyDev = std::abs (Decibels::gainToDecibels (steadyRms (-1.0f) / neutral));
+    const double atkDev  = std::abs (Decibels::gainToDecibels (steadyRms (+1.0f) / neutral));
+
+    check (bodyDev < 1.0, "BODY extreme shifts sustained level < 1 dB ("
+                              + String (bodyDev, 2) + " dB)");
+    check (atkDev < 1.0, "ATTACK extreme shifts sustained level < 1 dB ("
+                             + String (atkDev, 2) + " dB)");
+}
+
+static void testBehaviorStereoLinked()
+{
+    section ("Phase 5: behavior detector is stereo-linked");
+
+    //  A transient only in the LEFT channel must modulate both channels with
+    //  the same curve: the R/L gain ratio for a shared steady component stays
+    //  constant through the hit.
+    const double sr = 48000.0;
+    const int block = 512;
+
+    BandProcessor band;
+    band.prepare (sr, block, 2, 2);
+    band.setQuality (Quality::high);
+
+    BandProcessor::Settings s;
+    s.color = ColorType::warm;
+    s.drivePercent = 55.0f;
+    s.behavior = 1.0f;
+    s.centreHz = 1300.0f;
+    band.setSettings (s);
+
+    //  Both channels carry the same quiet 1 kHz tone; L additionally gets a
+    //  burst every 250 ms. If the detector were per-channel, L's tone would be
+    //  driven differently from R's during the burst.
+    AudioBuffer<float> buf (2, block);
+    std::vector<float> outL, outR;
+    int sampleIndex = 0;
+
+    for (int blk = 0; blk < 100; ++blk)
+    {
+        for (int i = 0; i < block; ++i, ++sampleIndex)
+        {
+            const float tone = 0.1f * (float) std::sin (2.0 * MathConstants<double>::pi * 1000.0 * sampleIndex / sr);
+            const int t = sampleIndex % (int) (0.25 * sr);
+            const float burst = t < (int) (0.01 * sr)
+                ? 0.5f * (float) std::sin (2.0 * MathConstants<double>::pi * 2000.0 * t / sr)
+                : 0.0f;
+            buf.setSample (0, i, tone + burst);
+            buf.setSample (1, i, tone);
+        }
+
+        band.setSettings (s);
+        band.process (buf);
+
+        for (int i = 0; i < block; ++i)
+        {
+            outL.push_back (buf.getSample (0, i));
+            outR.push_back (buf.getSample (1, i));
+        }
+    }
+
+    //  Measure R's steady tone level in the 30 ms after each burst versus far
+    //  from bursts; with a linked detector both see the same modulation, so R
+    //  is modulated NEAR the burst even though R itself has no burst.
+    const int period = (int) (0.25 * sr);
+    double nearBurst = 0.0, farBurst = 0.0;
+    int nearCount = 0, farCount = 0;
+
+    for (size_t i = (size_t) period * 2; i < outR.size(); ++i)
+    {
+        const int t = (int) (i % (size_t) period);
+        const double v = (double) outR[i] * outR[i];
+        if (t > (int) (0.001 * sr) && t < (int) (0.010 * sr)) { nearBurst += v; ++nearCount; }
+        if (t > (int) (0.100 * sr) && t < (int) (0.200 * sr)) { farBurst += v; ++farCount; }
+    }
+
+    const double modDepthDb = Decibels::gainToDecibels (
+        std::sqrt (nearBurst / nearCount) / std::sqrt (farBurst / farCount));
+
+    std::printf ("      R-channel modulation near L-only burst: %.2f dB\n", modDepthDb);
+    check (modDepthDb > 1.0, "linked detector modulates R for an L-only transient ("
+                                 + String (modDepthDb, 2) + " dB)");
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -1347,6 +1608,10 @@ int main()
     testSoloMuteLevel();
     testEngineMatrix();
     testQualitySwitchDuringPlayback();
+
+    testBehaviorAttackVsBody();
+    testBehaviorNoPumpingOnSustained();
+    testBehaviorStereoLinked();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;

@@ -48,6 +48,7 @@ juce_add_plugin(FourColor
 set(FOURCOLOR_CORE_SOURCES
     Source/Core/PresetLibrary.cpp
     Source/Dsp/BandProcessor.cpp
+    Source/Dsp/BehaviorDetector.cpp
     Source/Dsp/ColorEngine.cpp
     Source/Dsp/Crossover.cpp
     Source/Dsp/FourColorEngine.cpp
