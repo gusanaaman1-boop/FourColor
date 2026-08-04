@@ -1,9 +1,14 @@
 // The whole audio path, host-independent, so the test suite can drive it
 // without a plugin wrapper.
 //
-// Phase 1: input trim -> (processing placeholder: unity) -> latency-aligned
-// dry/wet mix -> output trim -> safety. The multiband chain is inserted in
-// later phases without changing this public surface.
+//   input trim -> 4-band crossover -> per-band [tone/colour/mix/level] ->
+//   recombine -> (global tone + auto level: Phase 7) -> fractional wet
+//   alignment -> latency-compensated dry/wet -> output trim -> safety
+//
+// Latency contract: the oversampler's fractional latency L is rounded UP to
+// the integer reported to the host; the wet sum is delayed by (ceil(L) - L)
+// through a Lagrange line and the dry path by ceil(L) exactly, so Mix and
+// global Bypass are sample-aligned at every quality.
 
 #pragma once
 
@@ -11,6 +16,8 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "../Core/ParameterIds.h"
+#include "BandProcessor.h"
+#include "Crossover.h"
 
 namespace fourcolor
 {
@@ -58,11 +65,15 @@ namespace fourcolor
 
         void process (juce::AudioBuffer<float>& buffer) noexcept;
 
-        //  Total latency introduced by the wet path, in samples at the host rate.
+        //  Total latency of the wet path at the host rate (integer contract).
         int getLatencySamples() const noexcept { return latencySamples; }
+
+        Crossover& getCrossover() noexcept { return crossover; }
+        BandProcessor& getBand (int i) noexcept { return bands[i]; }
 
     private:
         void applySafety (juce::AudioBuffer<float>& buffer) noexcept;
+        void updateLatency() noexcept;
 
         EngineParameters params;
 
@@ -71,7 +82,16 @@ namespace fourcolor
         int    numChannels = 2;
         int    latencySamples = 0;
 
+        Crossover crossover;
+        BandProcessor bands[numBands];
+
+        juce::AudioBuffer<float> bandBuffers[numBands];
         juce::AudioBuffer<float> dryBuffer;
+
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay;
+        //  Thiran for magnitude-flat fractional alignment (see BandProcessor.h).
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran> wetAlign;
+        float wetAlignDelay = 0.0f;
 
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> inputGain  { 1.0f };
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain { 1.0f };

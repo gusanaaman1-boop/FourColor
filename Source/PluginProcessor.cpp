@@ -212,6 +212,12 @@ namespace fourcolor
 
         pushParametersToEngine();
         engine.process (buffer);
+
+        //  Quality changes alter the oversampler latency; JUCE forwards this
+        //  to the host asynchronously.
+        const int latency = engine.getLatencySamples();
+        if (latency != getLatencySamples())
+            setLatencySamples (latency);
     }
 
     juce::AudioProcessorParameter* FourColorProcessor::getBypassParameter() const

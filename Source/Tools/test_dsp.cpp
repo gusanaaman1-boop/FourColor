@@ -266,24 +266,54 @@ static void testPassthroughAndSafety()
 
     MidiBuffer midi;
 
-    // Neutral settings: output ~= input once smoothing settles.
+    // Global bypass: output == input delayed by exactly the reported latency.
     {
-        AudioBuffer<float> ref;
-        AudioBuffer<float> buffer (2, block);
+        auto* bypassParam = proc.apvts.getParameter (param::bypassed);
+        bypassParam->setValueNotifyingHost (1.0f);
 
-        for (int blockIndex = 0; blockIndex < 20; ++blockIndex)
+        //  Continuous sine across blocks so the delay is observable.
+        std::vector<float> history;
+        AudioBuffer<float> buffer (2, block);
+        int sampleIndex = 0;
+        double maxError = 0.0;
+        const int latency = proc.getLatencySamples();
+
+        for (int blockIndex = 0; blockIndex < 40; ++blockIndex)
         {
-            auto sine = makeSine (2, block, 997.0, sr);
-            ref = sine;
-            buffer = sine;
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+            {
+                const float v = 0.5f * (float) std::sin (2.0 * MathConstants<double>::pi * 997.0 * sampleIndex / sr);
+                buffer.setSample (0, i, v);
+                buffer.setSample (1, i, v);
+                history.push_back (v);
+            }
+
             proc.processBlock (buffer, midi);
+
+            if (blockIndex >= 20)   // smoothing + delays settled
+                for (int i = 0; i < block; ++i)
+                {
+                    const int outIndex = blockIndex * block + i;
+                    const int inIndex  = outIndex - latency;
+                    if (inIndex >= 0)
+                        maxError = jmax (maxError, (double) std::abs (
+                            buffer.getSample (0, i) - history[(size_t) inIndex]));
+                }
         }
 
-        double maxError = 0.0;
-        for (int i = 0; i < block; ++i)
-            maxError = jmax (maxError, (double) std::abs (buffer.getSample (0, i) - ref.getSample (0, i)));
+        check (maxError < 1.0e-5, "global bypass = input delayed by reported latency ("
+                                      + String (latency) + " smp, max error " + String (maxError, 8) + ")");
+        bypassParam->setValueNotifyingHost (0.0f);
 
-        check (maxError < 1.0e-4, "neutral chain is transparent (max error " + String (maxError, 8) + ")");
+        //  Flush the bypass fade AND the filter ring-down before the silence
+        //  check: the 10 Hz DC-blocker pole alone needs ~8k samples to decay
+        //  below -100 dB (10 blocks left a 1.1e-5 tail).
+        AudioBuffer<float> flush (2, block);
+        for (int blockIndex = 0; blockIndex < 40; ++blockIndex)
+        {
+            flush.clear();
+            proc.processBlock (flush, midi);
+        }
     }
 
     // Silence in -> silence out, finite always.
@@ -291,7 +321,8 @@ static void testPassthroughAndSafety()
         AudioBuffer<float> buffer (2, block);
         buffer.clear();
         proc.processBlock (buffer, midi);
-        check (peakOf (buffer) < 1.0e-6f, "silence stays silent");
+        check (peakOf (buffer) < 1.0e-6f, "silence stays silent (peak "
+                                              + String (peakOf (buffer), 9) + ")");
         check (allFinite (buffer), "silence output is finite");
     }
 
@@ -1003,6 +1034,294 @@ static void testColorSwitchAndLatency()
 }
 
 // ================================================================================
+// Phase 4 — per-band processing chain
+// ================================================================================
+namespace
+{
+    //  A fully configured engine driven directly (no plugin wrapper).
+    void runEngineBlocks (FourColorEngine& engine, const EngineParameters& p,
+                          AudioBuffer<float>& io,
+                          const std::function<float (int ch, int sampleIndex)>& gen,
+                          int numBlocks, int block,
+                          const std::function<void (int blk, AudioBuffer<float>&)>& inspect = {})
+    {
+        engine.setParameters (p);
+        int sampleIndex = 0;
+
+        for (int blk = 0; blk < numBlocks; ++blk)
+        {
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                for (int c = 0; c < io.getNumChannels(); ++c)
+                    io.setSample (c, i, gen (c, sampleIndex));
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (inspect)
+                inspect (blk, io);
+        }
+    }
+}
+
+static void testCleanReconstruction()
+{
+    section ("Phase 4: all bands bypassed = flat clean reconstruction");
+
+    //  With every band bypassed the output is the crossover's allpass of the
+    //  input: flat magnitude at every probe frequency.
+    const double sr = 48000.0;
+    const int block = 512;
+
+    FourColorEngine engine;
+    engine.prepare (sr, block, 1);
+
+    EngineParameters p;
+    for (auto& b : p.bands)
+        b.bypass = true;
+    p.autoLevel = false;
+
+    for (double freq : { 40.0, 120.0, 700.0, 4500.0, 12000.0 })
+    {
+        engine.reset();
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        double sq = 0.0;
+        int counted = 0;
+
+        runEngineBlocks (engine, p, io,
+            [&] (int, int s) { return 0.4f * (float) std::sin (2.0 * MathConstants<double>::pi * freq * s / sr); },
+            80, block,
+            [&] (int blk, AudioBuffer<float>& buf)
+            {
+                if (blk >= 40)
+                {
+                    for (int i = 0; i < block; ++i)
+                        sq += (double) buf.getSample (0, i) * buf.getSample (0, i);
+                    counted += block;
+                }
+            });
+
+        const double outRms = std::sqrt (sq / counted);
+        const double devDb = Decibels::gainToDecibels (outRms / (0.4 / std::sqrt (2.0)), -120.0);
+        checkNear (devDb, 0.0, 0.05, "clean reconstruction flat at " + String (freq, 0) + " Hz");
+    }
+}
+
+static void testSoloMuteLevel()
+{
+    section ("Phase 4: solo / mute / band level");
+
+    const double sr = 48000.0;
+    const int block = 512;
+
+    auto bandRmsFor = [&] (const EngineParameters& p, double freq)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        double sq = 0.0; int counted = 0;
+        int sampleIndex = 0;
+
+        for (int blk = 0; blk < 60; ++blk)
+        {
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                io.setSample (0, i, 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * freq * sampleIndex / sr));
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (blk >= 30)
+            {
+                for (int i = 0; i < block; ++i)
+                    sq += (double) io.getSample (0, i) * io.getSample (0, i);
+                counted += block;
+            }
+        }
+        return std::sqrt (sq / counted);
+    };
+
+    EngineParameters base;
+    for (auto& b : base.bands)
+        b.bypass = true;      // keep engines out of the level comparison
+    base.autoLevel = false;
+
+    //  Solo the LOW band: 60 Hz passes, 8 kHz collapses.
+    {
+        auto p = base;
+        p.bands[0].solo = true;
+        const double low  = bandRmsFor (p, 60.0);
+        const double high = bandRmsFor (p, 8000.0);
+        const double refLow = bandRmsFor (base, 60.0);
+
+        check (low > refLow * 0.7, "solo LOW keeps low content ("
+                   + String (Decibels::gainToDecibels (low / refLow), 2) + " dB)");
+        check (high < refLow * 0.02, "solo LOW rejects 8 kHz by >34 dB ("
+                   + String (Decibels::gainToDecibels (high / refLow), 1) + " dB)");
+    }
+
+    //  Mute all bands: silence.
+    {
+        auto p = base;
+        for (auto& b : p.bands)
+            b.mute = true;
+        const double rms = bandRmsFor (p, 300.0);
+        check (rms < 1.0e-5, "all bands muted = silence (rms " + String (rms, 8) + ")");
+    }
+
+    //  Band level: -12 dB on the LOW band moves a 60 Hz sine by about -12 dB.
+    //  (Bands must NOT be bypassed for level to apply; use drive 0 WARM.)
+    {
+        EngineParameters p;
+        p.autoLevel = false;
+        for (auto& b : p.bands)
+            b.drive = 0.0f;
+
+        auto pLow = p;
+        pLow.bands[0].levelDb = -12.0f;
+
+        //  Tolerance: at 60 Hz the LMID band still contributes -24 dB of
+        //  leakage (LR4 slope one octave under the 120 Hz cut) which is not
+        //  attenuated by band 0's level - the exact sum is about -10.3 dB.
+        const double ref = bandRmsFor (p, 60.0);
+        const double cut = bandRmsFor (pLow, 60.0);
+        checkNear (Decibels::gainToDecibels (cut / ref), -12.0, 2.0,
+                   "band 0 level -12 dB moves 60 Hz by ~-12 dB (LR4 leakage included)");
+    }
+}
+
+static void testEngineMatrix()
+{
+    section ("Phase 4: sample-rate / block-size / channel matrix");
+
+    //  Every configuration must produce finite audio at a sane level and must
+    //  not allocate on the audio thread.
+    const double rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
+    const int blocks[] = { 1, 16, 32, 64, 128, 512, 1024, 2048 };
+
+    for (double sr : rates)
+    {
+        for (int block : blocks)
+        {
+            for (int chans : { 1, 2 })
+            {
+                FourColorEngine engine;
+                engine.prepare (sr, block, chans);
+
+                EngineParameters p;
+                p.bands[0].color = ColorType::warm;
+                p.bands[1].color = ColorType::iron;
+                p.bands[2].color = ColorType::bite;
+                p.bands[3].color = ColorType::fuzz;
+                for (auto& b : p.bands)
+                    b.drive = 60.0f;
+                p.autoLevel = false;
+                engine.setParameters (p);
+
+                AudioBuffer<float> io (chans, block);
+                bool finite = true;
+                float peak = 0.0f;
+                int sampleIndex = 0;
+
+                const int numBlocks = jmax (4, 4096 / block);
+
+                //  Warm up before arming the allocation tripwire.
+                for (int blk = 0; blk < 2; ++blk)
+                {
+                    for (int i = 0; i < block; ++i, ++sampleIndex)
+                        for (int c = 0; c < chans; ++c)
+                            io.setSample (c, i, 0.35f * (float) std::sin (2.0 * MathConstants<double>::pi * 180.0 * sampleIndex / sr)
+                                                + 0.15f * (float) std::sin (2.0 * MathConstants<double>::pi * 3000.0 * sampleIndex / sr));
+                    engine.process (io);
+                }
+
+                allocationCount.store (0);
+                trackAllocations.store (true);
+
+                for (int blk = 0; blk < numBlocks; ++blk)
+                {
+                    for (int i = 0; i < block; ++i, ++sampleIndex)
+                        for (int c = 0; c < chans; ++c)
+                            io.setSample (c, i, 0.35f * (float) std::sin (2.0 * MathConstants<double>::pi * 180.0 * sampleIndex / sr)
+                                                + 0.15f * (float) std::sin (2.0 * MathConstants<double>::pi * 3000.0 * sampleIndex / sr));
+
+                    engine.setParameters (p);
+                    engine.process (io);
+
+                    for (int c = 0; c < chans; ++c)
+                        for (int i = 0; i < block; ++i)
+                        {
+                            const float v = io.getSample (c, i);
+                            if (! std::isfinite (v)) finite = false;
+                            peak = jmax (peak, std::abs (v));
+                        }
+                }
+
+                trackAllocations.store (false);
+                const int allocs = allocationCount.load();
+
+                const bool ok = finite && peak < 4.0f && allocs == 0;
+                if (! ok || (block == 2048 && chans == 2))
+                    check (ok, String (sr / 1000.0, 1) + " kHz / block " + String (block)
+                                   + " / " + String (chans) + "ch: finite=" + String ((int) finite)
+                                   + " peak=" + String (peak, 3) + " allocs=" + String (allocs));
+                else
+                    ++checksRun;   // count quiet passes without 80 lines of noise
+            }
+        }
+    }
+
+    std::printf ("      matrix: %d configurations checked\n", 5 * 8 * 2);
+}
+
+static void testQualitySwitchDuringPlayback()
+{
+    section ("Phase 4: quality switch during playback");
+
+    const double sr = 48000.0;
+    const int block = 512;
+
+    FourColorEngine engine;
+    engine.prepare (sr, block, 2);
+
+    EngineParameters p;
+    for (auto& b : p.bands)
+        b.drive = 50.0f;
+    p.autoLevel = false;
+
+    AudioBuffer<float> io (2, block);
+    bool finite = true;
+    int sampleIndex = 0;
+    int latencies[4] = {};
+
+    for (int blk = 0; blk < 80; ++blk)
+    {
+        p.quality = (Quality) ((blk / 20) % 4);
+
+        for (int i = 0; i < block; ++i, ++sampleIndex)
+            for (int c = 0; c < 2; ++c)
+                io.setSample (c, i, 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 300.0 * sampleIndex / sr));
+
+        engine.setParameters (p);
+        engine.process (io);
+        latencies[(int) p.quality] = engine.getLatencySamples();
+
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < block; ++i)
+                if (! std::isfinite (io.getSample (c, i)))
+                    finite = false;
+    }
+
+    check (finite, "output stays finite through quality switches");
+    check (latencies[0] == 0, "draft (1x) reports zero latency");
+    check (latencies[1] > 0 && latencies[2] > latencies[1] && latencies[3] > latencies[2],
+           "latency grows with quality (" + String (latencies[0]) + "/" + String (latencies[1])
+               + "/" + String (latencies[2]) + "/" + String (latencies[3]) + " smp)");
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -1023,6 +1342,11 @@ int main()
     testAliasingByQuality();
     testAliasingTypicalCase();
     testColorSwitchAndLatency();
+
+    testCleanReconstruction();
+    testSoloMuteLevel();
+    testEngineMatrix();
+    testQualitySwitchDuringPlayback();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;
