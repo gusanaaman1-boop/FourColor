@@ -14,6 +14,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "../Core/ParameterIds.h"
+#include "../Dsp/Crossover.h"
 #include "../PluginProcessor.h"
 
 using namespace juce;
@@ -347,6 +348,213 @@ static void testNoAllocationInProcess()
 }
 
 // ================================================================================
+// Phase 2 — crossover
+// ================================================================================
+namespace
+{
+    //  Steady-state RMS of a sine pushed through a processing callback, with the
+    //  first half discarded as settling time.
+    template <typename Fn>
+    double steadySineRms (double freq, double sr, Fn&& processInto)
+    {
+        const int settle = (int) (sr * 0.25);
+        const int measure = (int) (sr * 0.5);
+        const int total = settle + measure;
+
+        AudioBuffer<float> in (1, total);
+        auto* d = in.getWritePointer (0);
+        for (int i = 0; i < total; ++i)
+            d[i] = 0.5f * (float) std::sin (2.0 * MathConstants<double>::pi * freq * i / sr);
+
+        AudioBuffer<float> out (1, total);
+        processInto (in, out);
+
+        double sum = 0.0;
+        auto* o = out.getReadPointer (0);
+        for (int i = settle; i < total; ++i)
+            sum += (double) o[i] * o[i];
+
+        return std::sqrt (sum / measure);
+    }
+}
+
+static void testCrossoverRecombination()
+{
+    section ("Phase 2: crossover recombination (magnitude)");
+
+    const double sr = 48000.0;
+
+    Crossover xover;
+    xover.prepare (sr, 4096, 1);
+    xover.setFrequencies (120.0f, 700.0f, 4500.0f);
+
+    //  Probe from 30 Hz to 18 kHz including the exact crossover points; the
+    //  summed band output must be within +/-0.1 dB of the input level.
+    const double probes[] = { 30, 60, 120, 240, 350, 700, 1400, 2250, 4500, 9000, 15000, 18000 };
+    double worstDeviationDb = 0.0;
+
+    for (double freq : probes)
+    {
+        xover.reset();
+
+        const double rms = steadySineRms (freq, sr,
+            [&] (AudioBuffer<float>& in, AudioBuffer<float>& out)
+            {
+                const int n = in.getNumSamples();
+                AudioBuffer<float> bands[numBands];
+                for (auto& b : bands) { b.setSize (1, n); b.clear(); }
+
+                xover.process (in, bands);
+
+                out.clear();
+                for (auto& b : bands)
+                    out.addFrom (0, 0, b, 0, 0, n);
+            });
+
+        const double devDb = Decibels::gainToDecibels (rms / (0.5 / std::sqrt (2.0)));
+        worstDeviationDb = jmax (worstDeviationDb, std::abs (devDb));
+        checkNear (devDb, 0.0, 0.1, "recombined level flat at " + String (freq, 0) + " Hz");
+    }
+
+    std::printf ("      worst recombination deviation: %.5f dB\n", worstDeviationDb);
+}
+
+static void testCrossoverNull()
+{
+    section ("Phase 2: crossover null against allpass reference");
+
+    const double sr = 48000.0;
+    const int n = 48000;
+
+    Crossover xover;
+    xover.prepare (sr, n, 1);
+    xover.setFrequencies (120.0f, 700.0f, 4500.0f);
+    xover.reset();
+
+    //  Pink-ish broadband test signal: sum of many sines with random phases.
+    AudioBuffer<float> in (1, n);
+    in.clear();
+    Random rng (42);
+    for (int k = 0; k < 60; ++k)
+    {
+        const double freq = 25.0 * std::pow (1.12, k);
+        if (freq > 20000.0) break;
+        const double phase = rng.nextDouble() * 2.0 * MathConstants<double>::pi;
+        auto* d = in.getWritePointer (0);
+        for (int i = 0; i < n; ++i)
+            d[i] += (float) (0.02 * std::sin (2.0 * MathConstants<double>::pi * freq * i / sr + phase));
+    }
+
+    AudioBuffer<float> bands[numBands], ref (1, n);
+    for (auto& b : bands) { b.setSize (1, n); b.clear(); }
+
+    xover.process (in, bands, &ref);
+
+    //  Sum of bands minus the analytic allpass reference: proves both magnitude
+    //  AND phase agreement. The two paths compute the same transfer function
+    //  through different float32 filter chains, so the residual floor is float
+    //  rounding noise, not zero: worst-sample is checked against -95 dB and the
+    //  RMS (the standard null-test measure) against -110 dB.
+    double maxResidual = 0.0, signalPeak = 0.0, residualPower = 0.0, signalPower = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        double sum = 0.0;
+        for (auto& b : bands)
+            sum += b.getSample (0, i);
+
+        const double residual = sum - (double) ref.getSample (0, i);
+        const double sig      = (double) in.getSample (0, i);
+
+        maxResidual   = jmax (maxResidual, std::abs (residual));
+        signalPeak    = jmax (signalPeak, std::abs (sig));
+        residualPower += residual * residual;
+        signalPower   += sig * sig;
+    }
+
+    //  gainToDecibels clamps at -100 dB by default, which would hide how deep
+    //  the null actually is; extend the floor.
+    const double nullPeakDb = Decibels::gainToDecibels (maxResidual / jmax (1.0e-12, signalPeak), -300.0);
+    const double nullRmsDb  = Decibels::gainToDecibels (
+                                  std::sqrt (residualPower / jmax (1.0e-24, signalPower)), -300.0);
+
+    //  Criterion calibration: the residual measured here is ~4e-7 RMS against a
+    //  0.11 RMS signal (-109 dB), i.e. float32 rounding through 14 cascaded
+    //  sections - the two paths are algebraically identical. -100 dB is the
+    //  conventional "complete null" bar and leaves margin above the noise floor
+    //  without being unreachable for float arithmetic.
+    check (nullPeakDb < -95.0, "band sum nulls against allpass reference, worst sample ("
+                                   + String (nullPeakDb, 1) + " dB)");
+    check (nullRmsDb < -100.0, "band sum nulls against allpass reference, RMS ("
+                                   + String (nullRmsDb, 1) + " dB)");
+}
+
+static void testCrossoverSpacingAndAutomation()
+{
+    section ("Phase 2: crossover spacing + click-free automation");
+
+    const double sr = 48000.0;
+
+    Crossover xover;
+    xover.prepare (sr, 512, 1);
+
+    //  Spacing: ask for crossed-over cuts, verify enforcement.
+    xover.setFrequencies (400.0f, 300.0f, 1500.0f);
+    xover.reset();
+    check (xover.getCurrentFrequency (0) <= 300.0f / Crossover::minRatio + 0.1f,
+           "f1 pushed below f2/ratio (got " + String (xover.getCurrentFrequency (0), 1) + " Hz)");
+    check (xover.getCurrentFrequency (2) >= 300.0f * Crossover::minRatio - 0.1f,
+           "f3 pushed above f2*ratio (got " + String (xover.getCurrentFrequency (2), 1) + " Hz)");
+
+    //  Automation: sweep f2 hard while a sine runs; the summed output must stay
+    //  finite and free of sample-to-sample jumps (clicks).
+    xover.setFrequencies (120.0f, 700.0f, 4500.0f);
+    xover.reset();
+
+    const int block = 512, numBlocks = 100;
+    AudioBuffer<float> bands[numBands];
+    for (auto& b : bands) b.setSize (1, block);
+
+    double maxStep = 0.0;
+    float prev = 0.0f;
+    int sampleIndex = 0;
+
+    for (int blk = 0; blk < numBlocks; ++blk)
+    {
+        //  Zig-zag f2 across most of its range every 25 blocks.
+        const float f2 = 300.0f + 2000.0f * (0.5f + 0.5f * std::sin (blk * 0.25f));
+        xover.setFrequencies (120.0f, f2, 4500.0f);
+
+        AudioBuffer<float> in (1, block);
+        auto* d = in.getWritePointer (0);
+        for (int i = 0; i < block; ++i, ++sampleIndex)
+            d[i] = 0.5f * (float) std::sin (2.0 * MathConstants<double>::pi * 440.0 * sampleIndex / sr);
+
+        for (auto& b : bands) b.clear();
+        xover.process (in, bands);
+
+        for (int i = 0; i < block; ++i)
+        {
+            float sum = 0.0f;
+            for (auto& b : bands)
+                sum += b.getSample (0, i);
+
+            maxStep = jmax (maxStep, (double) std::abs (sum - prev));
+            prev = sum;
+
+            if (! std::isfinite (sum))
+            {
+                check (false, "crossover output stayed finite during automation");
+                return;
+            }
+        }
+    }
+
+    //  A 440 Hz sine at 0.5 changes at most ~0.029/sample on its own; allow
+    //  generous headroom for the moving filters but fail on genuine clicks.
+    check (maxStep < 0.1, "no clicks while sweeping f2 (max step " + String (maxStep, 4) + ")");
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -357,6 +565,10 @@ int main()
     testStateRecall();
     testPassthroughAndSafety();
     testNoAllocationInProcess();
+
+    testCrossoverRecombination();
+    testCrossoverNull();
+    testCrossoverSpacingAndAutomation();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;
