@@ -47,8 +47,10 @@ juce_add_plugin(FourColor
 # Files are added here phase by phase as they come into existence.
 set(FOURCOLOR_CORE_SOURCES
     Source/Core/PresetLibrary.cpp
+    Source/Dsp/ColorEngine.cpp
     Source/Dsp/Crossover.cpp
     Source/Dsp/FourColorEngine.cpp
+    Source/Dsp/NonlinearStage.cpp
     Source/PluginEditor.cpp
     Source/PluginProcessor.cpp)
 

@@ -14,7 +14,9 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "../Core/ParameterIds.h"
+#include "../Dsp/ColorEngine.h"
 #include "../Dsp/Crossover.h"
+#include "../Dsp/NonlinearStage.h"
 #include "../PluginProcessor.h"
 
 using namespace juce;
@@ -555,6 +557,452 @@ static void testCrossoverSpacingAndAutomation()
 }
 
 // ================================================================================
+// Phase 3 — colour engines + oversampling
+// ================================================================================
+namespace
+{
+    //  Goertzel magnitude of one frequency in a windowless steady-state segment.
+    double goertzel (const float* data, int n, double freq, double sr)
+    {
+        const double w = 2.0 * MathConstants<double>::pi * freq / sr;
+        const double coeff = 2.0 * std::cos (w);
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+
+        for (int i = 0; i < n; ++i)
+        {
+            s0 = data[i] + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+
+        const double real = s1 - s2 * std::cos (w);
+        const double imag = s2 * std::sin (w);
+        return 2.0 * std::sqrt (real * real + imag * imag) / n;
+    }
+
+    //  Harmonic profile of an engine at a given drive: amplitudes of h1..h8
+    //  for a 220.5 Hz sine at -12 dBFS, measured after settling.
+    struct HarmonicProfile
+    {
+        double h[8] {};
+        double dc = 0.0;
+        double rms = 0.0;
+
+        //  Normalised (h1 = 1) log-spectral distance to another profile.
+        double distanceTo (const HarmonicProfile& other) const
+        {
+            double sum = 0.0;
+            for (int k = 1; k < 8; ++k)   // skip the fundamental itself
+            {
+                const double a = Decibels::gainToDecibels (h[k] / jmax (1.0e-12, h[0]), -120.0);
+                const double b = Decibels::gainToDecibels (other.h[k] / jmax (1.0e-12, other.h[0]), -120.0);
+                sum += (a - b) * (a - b);
+            }
+            return std::sqrt (sum / 7.0);
+        }
+    };
+
+    HarmonicProfile measureEngine (ColorType type, float drive, double sr = 48000.0)
+    {
+        //  Chosen so 8 harmonics fit under Nyquist with margin.
+        const double f0 = 220.5;
+        const int settle = (int) sr / 2, measure = (int) sr;
+
+        auto engine = createColorEngine (type);
+        engine->prepare (sr, 1);
+        engine->setDrive (drive);
+
+        AudioBuffer<float> buf (1, settle + measure);
+        auto* d = buf.getWritePointer (0);
+        for (int i = 0; i < settle + measure; ++i)
+            d[i] = 0.25f * (float) std::sin (2.0 * MathConstants<double>::pi * f0 * i / sr);
+
+        engine->processBlock (d, settle + measure, 0, nullptr);
+
+        HarmonicProfile p;
+        const float* m = d + settle;
+        for (int k = 0; k < 8; ++k)
+            p.h[k] = goertzel (m, measure, f0 * (k + 1), sr);
+
+        double sum = 0.0, sq = 0.0;
+        for (int i = 0; i < measure; ++i) { sum += m[i]; sq += (double) m[i] * m[i]; }
+        p.dc  = sum / measure;
+        p.rms = std::sqrt (sq / measure);
+        return p;
+    }
+}
+
+static void testColorEnginesDiffer()
+{
+    section ("Phase 3: engines are genuinely different");
+
+    HarmonicProfile profiles[4];
+    const char* names[] = { "WARM", "IRON", "BITE", "FUZZ" };
+
+    for (int e = 0; e < 4; ++e)
+    {
+        profiles[e] = measureEngine ((ColorType) e, 50.0f);
+
+        std::printf ("      %s  h1..h8 (dB rel h1):", names[e]);
+        for (int k = 0; k < 8; ++k)
+            std::printf (" %6.1f", Decibels::gainToDecibels (profiles[e].h[k] / jmax (1.0e-12, profiles[e].h[0]), -120.0));
+        std::printf ("   dc %.6f  rms %.4f\n", profiles[e].dc, profiles[e].rms);
+
+        check (std::abs (profiles[e].dc) < 1.0e-3,
+               String (names[e]) + " has no DC offset (" + String (profiles[e].dc, 7) + ")");
+        check (profiles[e].h[1] + profiles[e].h[2] > 1.0e-4,
+               String (names[e]) + " actually distorts at drive 50");
+    }
+
+    //  Pairwise log-spectral distance: engines must differ in SPECTRUM, not
+    //  just level. 3 dB average per-harmonic difference is clearly audible.
+    for (int a = 0; a < 4; ++a)
+        for (int b = a + 1; b < 4; ++b)
+        {
+            const double dist = profiles[a].distanceTo (profiles[b]);
+            check (dist > 3.0, String (names[a]) + " vs " + names[b]
+                                   + " spectra differ (distance " + String (dist, 2) + " dB)");
+        }
+
+    //  Character assertions from the design goals:
+    //  WARM keeps upper harmonics well below BITE's.
+    const double warmHigh = (profiles[0].h[5] + profiles[0].h[6] + profiles[0].h[7]) / profiles[0].h[0];
+    const double biteHigh = (profiles[2].h[5] + profiles[2].h[6] + profiles[2].h[7]) / profiles[2].h[0];
+    check (biteHigh > 2.0 * warmHigh, "BITE has far more upper harmonics than WARM ("
+               + String (Decibels::gainToDecibels (biteHigh / jmax (1.0e-12, warmHigh)), 1) + " dB more)");
+
+    //  Engines respond to drive: harmonic content grows.
+    for (int e = 0; e < 4; ++e)
+    {
+        const auto lo = measureEngine ((ColorType) e, 10.0f);
+        const auto hi = measureEngine ((ColorType) e, 90.0f);
+        const double loH = (lo.h[1] + lo.h[2]) / jmax (1.0e-12, lo.h[0]);
+        const double hiH = (hi.h[1] + hi.h[2]) / jmax (1.0e-12, hi.h[0]);
+        check (hiH > 2.0 * loH, String (names[e]) + " harmonic content grows with drive");
+    }
+}
+
+static void testColorLoudnessMatch()
+{
+    section ("Phase 3: loudness stays in a window across engines and drives");
+
+    //  With static compensation, RMS out should stay within roughly +/-4 dB of
+    //  RMS in for a -12 dBFS sine across all engines and the whole drive range.
+    //  (Auto Level narrows this further in Phase 7.)
+    const double sr = 48000.0;
+    const double refRms = 0.25 / std::sqrt (2.0);
+    const char* names[] = { "WARM", "IRON", "BITE", "FUZZ" };
+
+    for (int e = 0; e < 4; ++e)
+        for (float drive : { 5.0f, 25.0f, 50.0f, 75.0f, 100.0f })
+        {
+            NonlinearStage stage;
+            stage.prepare (sr, 512, 1);
+            stage.setQuality (Quality::high);
+            stage.setColor ((ColorType) e);
+            stage.setDrive (drive);
+            stage.reset();
+
+            double sq = 0.0;
+            int counted = 0;
+            int sampleIndex = 0;
+
+            for (int blk = 0; blk < 100; ++blk)
+            {
+                AudioBuffer<float> buf (1, 512);
+                auto* d = buf.getWritePointer (0);
+                for (int i = 0; i < 512; ++i, ++sampleIndex)
+                    d[i] = 0.25f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.5 * sampleIndex / sr);
+
+                stage.process (buf);
+
+                if (blk >= 50)
+                {
+                    for (int i = 0; i < 512; ++i)
+                        sq += (double) d[i] * d[i];
+                    counted += 512;
+                }
+            }
+
+            const double outRms = std::sqrt (sq / counted);
+            const double devDb = Decibels::gainToDecibels (outRms / refRms, -120.0);
+            check (std::abs (devDb) < 4.0,
+                   String (names[e]) + " drive " + String ((int) drive)
+                       + " level deviation " + String (devDb, 2) + " dB (limit 4)");
+        }
+}
+
+static void testAliasingByQuality()
+{
+    section ("Phase 3: aliasing vs quality (FUZZ, worst case)");
+
+    //  A hot sine through FUZZ at drive 85. Harmonics land at k*f0; everything
+    //  else above the analysis floor is aliasing. The alias level must drop
+    //  substantially from 1x to 4x. f0 sits exactly on an FFT bin and the
+    //  window is 4-term Blackman-Harris (-92 dB sidelobes): with a Hann window
+    //  and an off-bin f0, sidelobe leakage at -31 dB was measured masquerading
+    //  as an alias floor.
+    const double sr = 48000.0;
+    const int fftOrder = 15, fftSize = 1 << fftOrder;   // 32768
+    const double f0 = 1700.0 * sr / fftSize;            // 2490.2 Hz, bin-centred
+
+    double aliasDb[4] = {};
+
+    for (int q = 0; q < 4; ++q)
+    {
+        NonlinearStage stage;
+        stage.prepare (sr, 512, 1);
+        stage.setQuality ((Quality) q);
+        stage.setColor (ColorType::fuzz);
+        stage.setDrive (85.0f);
+        stage.reset();
+
+        //  Render enough audio to settle, keep the last fftSize samples.
+        std::vector<float> tail ((size_t) fftSize, 0.0f);
+        int written = 0, sampleIndex = 0;
+        const int totalBlocks = 140;   // ~1.5 s
+
+        for (int blk = 0; blk < totalBlocks; ++blk)
+        {
+            AudioBuffer<float> buf (1, 512);
+            auto* d = buf.getWritePointer (0);
+            for (int i = 0; i < 512; ++i, ++sampleIndex)
+                d[i] = 0.7f * (float) std::sin (2.0 * MathConstants<double>::pi * f0 * sampleIndex / sr);
+
+            stage.process (buf);
+
+            for (int i = 0; i < 512; ++i)
+            {
+                tail[(size_t) (written % fftSize)] = d[i];
+                ++written;
+            }
+        }
+
+        //  4-term Blackman-Harris window + FFT.
+        juce::dsp::FFT fft (fftOrder);
+        std::vector<float> fftData ((size_t) fftSize * 2, 0.0f);
+        for (int i = 0; i < fftSize; ++i)
+        {
+            const double t = 2.0 * MathConstants<double>::pi * i / (fftSize - 1);
+            const float w = (float) (0.35875 - 0.48829 * std::cos (t)
+                                   + 0.14128 * std::cos (2.0 * t)
+                                   - 0.01168 * std::cos (3.0 * t));
+            fftData[(size_t) i] = tail[(size_t) ((written + i) % fftSize)] * w;
+        }
+        fft.performRealOnlyForwardTransform (fftData.data());
+
+        auto binMag = [&] (int bin)
+        {
+            const float re = fftData[(size_t) (2 * bin)];
+            const float im = fftData[(size_t) (2 * bin + 1)];
+            return std::sqrt ((double) re * re + (double) im * im);
+        };
+
+        //  Harmonic bins (+/-6 bins for the BH window main lobe), fundamental.
+        const double binHz = sr / fftSize;
+        std::vector<bool> isHarmonic ((size_t) fftSize / 2, false);
+        for (int k = 1; k * f0 < sr / 2.0; ++k)
+        {
+            const int centre = (int) std::round (k * f0 / binHz);
+            for (int b = centre - 6; b <= centre + 6; ++b)
+                if (b >= 0 && b < fftSize / 2)
+                    isHarmonic[(size_t) b] = true;
+        }
+        //  Ignore DC and the sub-30 Hz region (window leakage).
+        for (int b = 0; b < (int) (30.0 / binHz) + 1; ++b)
+            isHarmonic[(size_t) b] = true;
+
+        const double fundamental = binMag ((int) std::round (f0 / binHz));
+
+        //  Two measures. The criterion applies to the AUDIBLE band (< 20 kHz):
+        //  a half-band decimator's transition band straddles Nyquist, so
+        //  content just above 24 kHz folds to just below it with partial
+        //  attenuation regardless of the oversampling factor. That near-24k
+        //  fold (measured at 23.1 kHz here) is inherent to half-band FIR
+        //  oversampling, is above audibility, and is reported separately.
+        double worstAlias = 0.0, worstFull = 0.0;
+        int worstBin = 0, worstFullBin = 0;
+        const int audibleLimitBin = (int) (20000.0 / binHz);
+
+        for (int b = 1; b < fftSize / 2; ++b)
+        {
+            if (isHarmonic[(size_t) b])
+                continue;
+
+            const double m = binMag (b);
+            if (m > worstFull)      { worstFull = m; worstFullBin = b; }
+            if (b <= audibleLimitBin && m > worstAlias) { worstAlias = m; worstBin = b; }
+        }
+
+        aliasDb[q] = Decibels::gainToDecibels (worstAlias / jmax (1.0e-12, fundamental), -200.0);
+        const double fullDb = Decibels::gainToDecibels (worstFull / jmax (1.0e-12, fundamental), -200.0);
+        std::printf ("      %dx: worst audible alias %.1f dB (at %.0f Hz); full band %.1f dB (at %.0f Hz)\n",
+                     1 << q, -aliasDb[q], worstBin * binHz, -fullDb, worstFullBin * binHz);
+    }
+
+    //  Criteria calibrated to the physics of the worst case: a hard-gated fuzz
+    //  spectrum decays roughly 1/k, so even a perfect decimator leaves the
+    //  fold-back of whatever the transition band passes. Each quality step must
+    //  clearly improve (>3 dB), 4x must hold -40 dB and 8x -55 dB on THIS
+    //  worst-case signal. Typical material is far cleaner - measured below.
+    check (aliasDb[1] < aliasDb[0] - 3.0, "2x clearly reduces worst-case alias vs 1x ("
+               + String (aliasDb[0] - aliasDb[1], 1) + " dB)");
+    check (aliasDb[2] < aliasDb[1] - 3.0, "4x clearly reduces worst-case alias vs 2x ("
+               + String (aliasDb[1] - aliasDb[2], 1) + " dB)");
+    check (aliasDb[3] < aliasDb[2] - 3.0, "8x clearly reduces worst-case alias vs 4x ("
+               + String (aliasDb[2] - aliasDb[3], 1) + " dB)");
+    check (aliasDb[2] < -40.0, "4x (default) worst-case audible alias below -40 dB ("
+               + String (aliasDb[2], 1) + " dB)");
+    check (aliasDb[3] < -55.0, "8x (Ultra) worst-case audible alias below -55 dB ("
+               + String (aliasDb[3], 1) + " dB)");
+}
+
+static void testAliasingTypicalCase()
+{
+    section ("Phase 3: aliasing at default quality, typical material (BITE)");
+
+    //  BITE at drive 60 on a -12 dBFS 2490 Hz sine: the kind of signal the
+    //  default quality actually meets. Audible-band alias must clear -60 dB.
+    const double sr = 48000.0;
+    const int fftOrder = 15, fftSize = 1 << fftOrder;
+    const double f0 = 1700.0 * sr / fftSize;
+
+    NonlinearStage stage;
+    stage.prepare (sr, 512, 1);
+    stage.setQuality (Quality::high);
+    stage.setColor (ColorType::bite);
+    stage.setDrive (60.0f);
+    stage.reset();
+
+    std::vector<float> tail ((size_t) fftSize, 0.0f);
+    int written = 0, sampleIndex = 0;
+
+    for (int blk = 0; blk < 140; ++blk)
+    {
+        AudioBuffer<float> buf (1, 512);
+        auto* d = buf.getWritePointer (0);
+        for (int i = 0; i < 512; ++i, ++sampleIndex)
+            d[i] = 0.25f * (float) std::sin (2.0 * MathConstants<double>::pi * f0 * sampleIndex / sr);
+
+        stage.process (buf);
+
+        for (int i = 0; i < 512; ++i)
+            tail[(size_t) (written++ % fftSize)] = d[i];
+    }
+
+    juce::dsp::FFT fft (fftOrder);
+    std::vector<float> fftData ((size_t) fftSize * 2, 0.0f);
+    for (int i = 0; i < fftSize; ++i)
+    {
+        const double t = 2.0 * MathConstants<double>::pi * i / (fftSize - 1);
+        const float w = (float) (0.35875 - 0.48829 * std::cos (t)
+                               + 0.14128 * std::cos (2.0 * t)
+                               - 0.01168 * std::cos (3.0 * t));
+        fftData[(size_t) i] = tail[(size_t) ((written + i) % fftSize)] * w;
+    }
+    fft.performRealOnlyForwardTransform (fftData.data());
+
+    auto binMag = [&] (int bin)
+    {
+        const float re = fftData[(size_t) (2 * bin)];
+        const float im = fftData[(size_t) (2 * bin + 1)];
+        return std::sqrt ((double) re * re + (double) im * im);
+    };
+
+    const double binHz = sr / fftSize;
+    std::vector<bool> isHarmonic ((size_t) fftSize / 2, false);
+    for (int k = 1; k * f0 < sr / 2.0; ++k)
+    {
+        const int centre = (int) std::round (k * f0 / binHz);
+        for (int b = centre - 6; b <= centre + 6; ++b)
+            if (b >= 0 && b < fftSize / 2)
+                isHarmonic[(size_t) b] = true;
+    }
+    for (int b = 0; b < (int) (30.0 / binHz) + 1; ++b)
+        isHarmonic[(size_t) b] = true;
+
+    const double fundamental = binMag ((int) std::round (f0 / binHz));
+    const int audibleLimitBin = (int) (20000.0 / binHz);
+
+    double worst = 0.0;
+    for (int b = 1; b <= audibleLimitBin; ++b)
+        if (! isHarmonic[(size_t) b])
+            worst = jmax (worst, binMag (b));
+
+    const double db = Decibels::gainToDecibels (worst / jmax (1.0e-12, fundamental), -200.0);
+    check (db < -60.0, "typical-material audible alias below -60 dB at default quality ("
+                           + String (db, 1) + " dB)");
+}
+
+static void testColorSwitchAndLatency()
+{
+    section ("Phase 3: colour switch is click-free; latency reported per quality");
+
+    const double sr = 48000.0;
+
+    NonlinearStage stage;
+    stage.prepare (sr, 512, 1);
+
+    for (int q = 0; q < 4; ++q)
+    {
+        stage.setQuality ((Quality) q);
+        std::printf ("      quality %dx latency: %.2f samples\n", 1 << q, stage.getLatencySamples());
+        check (q == 0 ? stage.getLatencySamples() == 0.0f
+                      : stage.getLatencySamples() > 0.0f,
+               "latency reported for quality " + String (1 << q) + "x");
+    }
+
+    //  Switch colour mid-playback. A hard-driven engine legitimately outputs
+    //  near-square edges, so "no clicks" cannot mean "small sample steps";
+    //  it means the steps during the fade windows are no larger than the
+    //  steps the involved engines produce in steady state.
+    stage.setQuality (Quality::high);
+    stage.setColor (ColorType::warm);
+    stage.setDrive (60.0f);
+    stage.reset();
+
+    double maxStepFade = 0.0, maxStepSteady = 0.0;
+    float prev = 0.0f;
+    int sampleIndex = 0;
+    bool finite = true;
+
+    //  Fade length is 15 ms = 720 samples at 48k = under 2 blocks of 512.
+    auto isFadeBlock = [] (int blk) { return (blk >= 20 && blk <= 22) || (blk >= 40 && blk <= 42); };
+
+    for (int blk = 0; blk < 60; ++blk)
+    {
+        if (blk == 20) stage.setColor (ColorType::fuzz);
+        if (blk == 40) stage.setColor (ColorType::iron);
+
+        AudioBuffer<float> buf (1, 512);
+        auto* d = buf.getWritePointer (0);
+        for (int i = 0; i < 512; ++i, ++sampleIndex)
+            d[i] = 0.4f * (float) std::sin (2.0 * MathConstants<double>::pi * 330.0 * sampleIndex / sr);
+
+        stage.process (buf);
+
+        for (int i = 0; i < 512; ++i)
+        {
+            const float s = d[i];
+            if (! std::isfinite (s)) finite = false;
+
+            const double step = std::abs (s - prev);
+            if (isFadeBlock (blk))
+                maxStepFade = jmax (maxStepFade, step);
+            else if (blk > 4)
+                maxStepSteady = jmax (maxStepSteady, step);
+
+            prev = s;
+        }
+    }
+
+    check (finite, "colour switching output stays finite");
+    check (maxStepFade <= maxStepSteady * 1.5 + 0.02,
+           "colour switch adds no clicks beyond the engines' own waveform edges (fade max step "
+               + String (maxStepFade, 4) + ", steady max step " + String (maxStepSteady, 4) + ")");
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -569,6 +1017,12 @@ int main()
     testCrossoverRecombination();
     testCrossoverNull();
     testCrossoverSpacingAndAutomation();
+
+    testColorEnginesDiffer();
+    testColorLoudnessMatch();
+    testAliasingByQuality();
+    testAliasingTypicalCase();
+    testColorSwitchAndLatency();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;

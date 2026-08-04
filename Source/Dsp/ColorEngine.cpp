@@ -1,0 +1,288 @@
+#include "ColorEngine.h"
+
+namespace fourcolor
+{
+    // --- base -----------------------------------------------------------------
+    void ColorEngine::prepare (double sampleRate, int numChannels)
+    {
+        rate = sampleRate;
+        channelCount = juce::jlimit (1, maxChannels, numChannels);
+        prepareInternals();
+        setDrive (d01 * 100.0f);
+        reset();
+    }
+
+    void ColorEngine::reset()
+    {
+        resetInternals();
+    }
+
+    void ColorEngine::setDrive (float drivePercent) noexcept
+    {
+        d01 = juce::jlimit (0.0f, 1.0f, drivePercent * 0.01f);
+        preGain = juce::Decibels::decibelsToGain (d01 * maxDriveDb());
+        driveChanged();
+        updateCompensation();
+    }
+
+    void ColorEngine::updateCompensation() noexcept
+    {
+        //  Match the level of a -12 dBFS sine through the memoryless curve.
+        //  RMS-ish: sample the curve at a few points of the half cycle.
+        constexpr float ref = 0.25f;
+        float inPower = 0.0f, outPower = 0.0f;
+
+        for (int i = 0; i < 16; ++i)
+        {
+            const float phase = (i + 0.5f) * (juce::MathConstants<float>::pi / 16.0f);
+            const float x = ref * std::sin (phase);
+            const float y = staticShape (x * preGain);
+            inPower  += x * x;
+            outPower += y * y;
+        }
+
+        compensation = (outPower > 1.0e-12f) ? std::sqrt (inPower / outPower) : 1.0f;
+        //  Never boost by more than 12 dB or cut by more than 24 dB.
+        compensation = juce::jlimit (0.0631f, 3.98f, compensation);
+    }
+
+    // --- WARM -----------------------------------------------------------------
+    namespace
+    {
+        inline float rationalSoft (float u) noexcept { return u / (1.0f + std::abs (u)); }
+    }
+
+    void WarmEngine::prepareInternals()
+    {
+        for (auto& c : ch)
+        {
+            //  Slow sag: reacts over ~120 ms, recovers over the same one-pole.
+            c.sagEnv.setCutoff (rate, 1.3f);
+            c.dc.prepare (rate);
+        }
+    }
+
+    void WarmEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.sagEnv.reset(); c.dc.reset(); }
+    }
+
+    void WarmEngine::driveChanged() noexcept
+    {
+        bias     = 0.12f * d01;
+        biasOut  = rationalSoft (bias);
+        sagDepth = 0.35f * d01;
+    }
+
+    float WarmEngine::staticShape (float u) const noexcept
+    {
+        return rationalSoft (u + bias) - biasOut;
+    }
+
+    void WarmEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+
+            //  Sag eases the drive as the (driven) level stays high, which is
+            //  the "program-dependent" part of the warmth.
+            const float level = c.sagEnv.process (std::abs (data[i] * g));
+            const float sag   = 1.0f - sagDepth * juce::jmin (1.0f, level);
+
+            const float u = data[i] * g * sag + bias;
+            data[i] = c.dc.process (rationalSoft (u) - biasOut);
+        }
+    }
+
+    // --- IRON -----------------------------------------------------------------
+    void IronEngine::prepareInternals()
+    {
+        for (auto& c : ch)
+        {
+            c.coreLoss.setCutoff (rate, 280.0f);   // the loop returns only lows: density
+            c.dc.prepare (rate);
+        }
+    }
+
+    void IronEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.coreLoss.reset(); c.lastOut = 0.0f; c.dc.reset(); }
+    }
+
+    void IronEngine::driveChanged() noexcept
+    {
+        fbAmount   = 0.45f * d01;
+        evenAmount = 0.10f + 0.15f * d01;
+    }
+
+    float IronEngine::staticShape (float u) const noexcept
+    {
+        //  Memoryless approximation of the loop for gain compensation only.
+        const float v = u + evenAmount * u * u / (1.0f + std::abs (u));
+        return std::tanh (v);
+    }
+
+    void IronEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+
+            //  Feedback around the saturator: the low-passed previous output is
+            //  subtracted at the input, so the curve's operating point depends
+            //  on recent history. Loop is stable: tanh is bounded, |fb| < 0.5.
+            const float memory = c.coreLoss.process (c.lastOut);
+            const float u = data[i] * g - fbAmount * memory;
+            const float v = u + evenAmount * u * u / (1.0f + std::abs (u));
+            const float y = std::tanh (v);
+
+            c.lastOut = y;
+            data[i] = c.dc.process (y);
+        }
+    }
+
+    // --- BITE -----------------------------------------------------------------
+    void BiteEngine::prepareInternals()
+    {
+        for (auto& c : ch)
+        {
+            c.preHp.setCutoff (rate, 1800.0f);
+            c.postHp.setCutoff (rate, 1800.0f);
+            c.dc.prepare (rate);
+        }
+    }
+
+    void BiteEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.preHp.reset(); c.postHp.reset(); c.dc.reset(); }
+    }
+
+    void BiteEngine::driveChanged() noexcept
+    {
+        emphasis = 0.6f + 1.2f * d01;
+    }
+
+    float BiteEngine::staticShape (float u) const noexcept
+    {
+        //  Asymmetric exponential diode pair with a deliberately short knee
+        //  (hardness 2.2): strong odd AND even content that arrives quickly,
+        //  with clear upper partials - the defining difference from WARM.
+        constexpr float h = 2.5f;
+
+        if (u >= 0.0f)
+            return (1.0f - std::exp (-h * u)) / h;
+
+        return -(1.0f - std::exp (1.3f * h * u)) / (1.3f * h);
+    }
+
+    void BiteEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+
+        //  De-emphasis takes back only half the boost: the rest is the
+        //  engine's forward, present character. Taking back 100% was measured
+        //  to leave BITE with FEWER upper harmonics than WARM.
+        const float deemph = 0.5f * emphasis / (1.0f + emphasis);
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+            float u = data[i] * g;
+
+            //  Internal pre-emphasis: push the upper mids INTO the clipper...
+            u += emphasis * c.preHp.processHigh (u);
+
+            float y = staticShape (u);
+
+            //  ...and take the same amount back out afterwards, so the result
+            //  is "distorted brighter" rather than just "brighter".
+            y -= deemph * c.postHp.processHigh (y);
+
+            data[i] = c.dc.process (y);
+        }
+    }
+
+    // --- FUZZ -----------------------------------------------------------------
+    void FuzzEngine::prepareInternals()
+    {
+        //  Fast gate envelope: ~0.5 ms attack, ~30 ms release.
+        envAttack  = 1.0f - std::exp (-1.0f / (0.0005f * (float) rate));
+        envRelease = 1.0f - std::exp (-1.0f / (0.030f * (float) rate));
+
+        for (auto& c : ch)
+            c.dc.prepare (rate);
+    }
+
+    void FuzzEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.env = 0.0f; c.dc.reset(); }
+    }
+
+    void FuzzEngine::driveChanged() noexcept
+    {
+        rectify       = 0.35f * d01;
+        gateThreshold = 0.002f + 0.018f * d01;   // more drive, more sputter
+    }
+
+    namespace
+    {
+        inline float foldOnce (float u) noexcept
+        {
+            if (u >  1.0f) return  2.0f - u;
+            if (u < -1.0f) return -2.0f - u;
+            return u;
+        }
+    }
+
+    float FuzzEngine::staticShape (float u) const noexcept
+    {
+        float v = (1.0f - rectify) * u + rectify * std::abs (u);
+        v = foldOnce (foldOnce (v));
+        return juce::jlimit (-1.0f, 1.0f, v);
+    }
+
+    void FuzzEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+        const float t2 = gateThreshold * gateThreshold;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float x = data[i];
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+
+            //  Gate envelope follows the INPUT, so quiet decays collapse in
+            //  that broken, sputtering way instead of sustaining politely.
+            const float mag = std::abs (x);
+            c.env += (mag > c.env ? envAttack : envRelease) * (mag - c.env);
+            const float e2 = c.env * c.env;
+            const float gate = e2 / (e2 + t2);
+
+            //  Partial rectification (even harmonics + the ragged texture),
+            //  then a double fold, then a clamp.
+            float v = (1.0f - rectify) * (x * g) + rectify * std::abs (x * g);
+            v = foldOnce (foldOnce (v));
+            v = juce::jlimit (-1.0f, 1.0f, v);
+
+            data[i] = c.dc.process (v * gate);
+        }
+    }
+
+    // --- factory --------------------------------------------------------------
+    std::unique_ptr<ColorEngine> createColorEngine (ColorType type)
+    {
+        switch (type)
+        {
+            case ColorType::warm: return std::make_unique<WarmEngine>();
+            case ColorType::iron: return std::make_unique<IronEngine>();
+            case ColorType::bite: return std::make_unique<BiteEngine>();
+            case ColorType::fuzz: return std::make_unique<FuzzEngine>();
+        }
+        return std::make_unique<WarmEngine>();
+    }
+}
