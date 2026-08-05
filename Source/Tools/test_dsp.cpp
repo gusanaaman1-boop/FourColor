@@ -1583,6 +1583,226 @@ static void testBehaviorStereoLinked()
 }
 
 // ================================================================================
+// Phase 6 — Harmonic Space
+// ================================================================================
+namespace
+{
+    //  Renders a band through BandProcessor and returns the full output.
+    std::vector<std::vector<float>> renderBand (int bandIndex, int chans, float drive,
+                                                float spacePercent, double sr, int totalSamples,
+                                                const std::function<float (int c, int s)>& gen)
+    {
+        const int block = 512;
+
+        BandProcessor band;
+        band.prepare (sr, block, chans, bandIndex);
+        band.setQuality (Quality::high);
+
+        BandProcessor::Settings s;
+        s.color = ColorType::iron;
+        s.drivePercent = drive;
+        s.spacePercent = spacePercent;
+        s.centreHz = 400.0f;
+        band.setSettings (s);
+
+        std::vector<std::vector<float>> out ((size_t) chans);
+        AudioBuffer<float> buf (chans, block);
+
+        for (int start = 0; start < totalSamples; start += block)
+        {
+            for (int i = 0; i < block; ++i)
+                for (int c = 0; c < chans; ++c)
+                    buf.setSample (c, i, gen (c, start + i));
+
+            band.setSettings (s);
+            band.process (buf);
+
+            for (int i = 0; i < block; ++i)
+                for (int c = 0; c < chans; ++c)
+                    out[(size_t) c].push_back (buf.getSample (c, i));
+        }
+        return out;
+    }
+
+    double diffRms (const std::vector<float>& a, const std::vector<float>& b, size_t from)
+    {
+        double sq = 0.0;
+        for (size_t i = from; i < a.size(); ++i)
+            sq += (double) (a[i] - b[i]) * (a[i] - b[i]);
+        return std::sqrt (sq / (a.size() - from));
+    }
+}
+
+static void testSpaceIsHarmonicOnly()
+{
+    section ("Phase 6: Space works on the nonlinear residual only");
+
+    const double sr = 48000.0;
+    const int total = 48000 * 2;
+
+    //  Two tones so the saturation makes intermodulation as well. The QUIET
+    //  variant drives the same curve in its near-linear region: if Space were
+    //  a reverb on the source, its relative halo would be level-independent;
+    //  because it diffuses the RESIDUAL, the relative halo must collapse with
+    //  the nonlinearity. (Note the engines colour even at drive 0 by design,
+    //  so "drive 0 = clean" is not a valid reference - level is.)
+    auto genAt = [sr] (float scale)
+    {
+        return [sr, scale] (int, int s)
+        {
+            return scale * (0.30f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * s / sr)
+                          + 0.15f * (float) std::sin (2.0 * MathConstants<double>::pi * 470.0 * s / sr));
+        };
+    };
+
+    const auto quietOff = renderBand (1, 1, 80.0f, 0.0f, sr, total, genAt (0.1f));
+    const auto quietOn  = renderBand (1, 1, 80.0f, 100.0f, sr, total, genAt (0.1f));
+    const auto hotOff   = renderBand (1, 1, 80.0f, 0.0f, sr, total, genAt (1.0f));
+    const auto hotOn    = renderBand (1, 1, 80.0f, 100.0f, sr, total, genAt (1.0f));
+
+    const size_t settle = 48000;   // let the least-squares fit converge
+    auto rmsFrom = [] (const std::vector<float>& v, size_t from)
+    {
+        double sq = 0.0;
+        for (size_t i = from; i < v.size(); ++i) sq += (double) v[i] * v[i];
+        return std::sqrt (sq / (v.size() - from));
+    };
+
+    const double haloHotRel   = diffRms (hotOn[0], hotOff[0], settle)     / rmsFrom (hotOff[0], settle);
+    const double haloQuietRel = diffRms (quietOn[0], quietOff[0], settle) / rmsFrom (quietOff[0], settle);
+
+    std::printf ("      relative halo: quiet (near-linear) %.5f, hot (saturated) %.5f\n",
+                 haloQuietRel, haloHotRel);
+
+    check (haloHotRel > 0.05, "space adds an audible halo when the engine distorts (rel rms "
+                                  + String (haloHotRel, 4) + ")");
+    check (haloHotRel > 4.0 * haloQuietRel,
+           "the halo follows the DISTORTION, not the source (hot/quiet relative ratio "
+               + String (haloHotRel / jmax (1.0e-9, haloQuietRel), 1) + "x)");
+}
+
+static void testSpaceMonoBassAndCorrelation()
+{
+    section ("Phase 6: LOW space stays mono; upper space keeps mono compatibility");
+
+    const double sr = 48000.0;
+    const int total = 48000 * 2;
+
+    //  LOW band (index 0), stereo in: the ADDED halo must be identical L/R.
+    {
+        auto gen = [sr] (int, int s)
+        { return 0.4f * (float) std::sin (2.0 * MathConstants<double>::pi * 70.0 * s / sr); };
+
+        const auto off = renderBand (0, 2, 80.0f, 0.0f, sr, total, gen);
+        const auto on  = renderBand (0, 2, 80.0f, 100.0f, sr, total, gen);
+
+        double maxLrDiff = 0.0;
+        for (size_t i = 48000; i < on[0].size(); ++i)
+        {
+            const double haloL = on[0][i] - off[0][i];
+            const double haloR = on[1][i] - off[1][i];
+            maxLrDiff = jmax (maxLrDiff, std::abs (haloL - haloR));
+        }
+        check (maxLrDiff < 1.0e-6, "LOW-band halo is strictly mono (max L/R diff "
+                                       + String (maxLrDiff, 9) + ")");
+    }
+
+    //  HMID band, stereo: halo is decorrelated but the total stays mono-safe
+    //  (positive correlation - no phase cancellation on fold-down).
+    {
+        auto gen = [sr] (int, int s)
+        { return 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 1300.0 * s / sr); };
+
+        const auto on = renderBand (2, 2, 80.0f, 100.0f, sr, total, gen);
+
+        double lr = 0.0, ll = 0.0, rr = 0.0;
+        for (size_t i = 48000; i < on[0].size(); ++i)
+        {
+            lr += (double) on[0][i] * on[1][i];
+            ll += (double) on[0][i] * on[0][i];
+            rr += (double) on[1][i] * on[1][i];
+        }
+        const double correlation = lr / std::sqrt (jmax (1.0e-18, ll * rr));
+        check (correlation > 0.5, "HMID at full space keeps L/R correlation > 0.5 ("
+                                      + String (correlation, 3) + ")");
+
+        //  And the channels are actually decorrelated (it IS stereo).
+        check (correlation < 0.999, "upper-band space is not just dual mono ("
+                                        + String (correlation, 4) + ")");
+    }
+}
+
+static void testSpaceDecaysAndZeroCost()
+{
+    section ("Phase 6: Space decays fast and is skipped at 0%");
+
+    const double sr = 48000.0;
+
+    //  A burst then silence: the halo must die quickly (no reverb tail).
+    {
+        auto gen = [sr] (int, int s)
+        {
+            return s < 4800 ? 0.5f * (float) std::sin (2.0 * MathConstants<double>::pi * 500.0 * s / sr)
+                            : 0.0f;
+        };
+
+        const auto on = renderBand (1, 1, 80.0f, 100.0f, sr, 48000, gen);
+
+        //  Level 300 ms after the burst ends.
+        double post = 0.0;
+        const size_t from = 4800 + (size_t) (0.3 * sr);
+        for (size_t i = from; i < from + 4800; ++i)
+            post = jmax (post, (double) std::abs (on[0][i]));
+
+        check (post < 1.0e-4, "halo fully decayed 300 ms after the source stopped (peak "
+                                  + String (post, 7) + ")");
+    }
+
+    //  Returning to 0% leaves no residue: a run that had space at 100% and
+    //  then turned it off converges to the same steady output as a run where
+    //  space was never on (the skip path really is clean).
+    {
+        const int block = 512;
+        auto makeBand = [&] { auto b = std::make_unique<BandProcessor>();
+                              b->prepare (sr, block, 1, 1);
+                              b->setQuality (Quality::high);
+                              return b; };
+        auto bandA = makeBand(), bandB = makeBand();
+
+        BandProcessor::Settings sA, sB;
+        sA.drivePercent = sB.drivePercent = 70.0f;
+        sA.spacePercent = 0.0f;
+
+        AudioBuffer<float> bufA (1, block), bufB (1, block);
+        double maxTailDiff = 0.0;
+        int sampleIndex = 0;
+
+        for (int blk = 0; blk < 200; ++blk)
+        {
+            sB.spacePercent = blk < 60 ? 100.0f : 0.0f;   // on, then off
+
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+            {
+                const float v = 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 300.0 * sampleIndex / sr);
+                bufA.setSample (0, i, v);
+                bufB.setSample (0, i, v);
+            }
+
+            bandA->setSettings (sA); bandA->process (bufA);
+            bandB->setSettings (sB); bandB->process (bufB);
+
+            if (blk >= 150)   // well after the off-ramp and comb drain
+                for (int i = 0; i < block; ++i)
+                    maxTailDiff = jmax (maxTailDiff, (double) std::abs (
+                        bufA.getSample (0, i) - bufB.getSample (0, i)));
+        }
+
+        check (maxTailDiff < 1.0e-6, "space off leaves no residue vs never-on ("
+                                         + String (maxTailDiff, 9) + ")");
+    }
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -1612,6 +1832,10 @@ int main()
     testBehaviorAttackVsBody();
     testBehaviorNoPumpingOnSustained();
     testBehaviorStereoLinked();
+
+    testSpaceIsHarmonicOnly();
+    testSpaceMonoBassAndCorrelation();
+    testSpaceDecaysAndZeroCost();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;

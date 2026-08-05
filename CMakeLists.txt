@@ -52,6 +52,7 @@ set(FOURCOLOR_CORE_SOURCES
     Source/Dsp/ColorEngine.cpp
     Source/Dsp/Crossover.cpp
     Source/Dsp/FourColorEngine.cpp
+    Source/Dsp/HarmonicSpace.cpp
     Source/Dsp/NonlinearStage.cpp
     Source/Dsp/ToneStage.cpp
     Source/PluginEditor.cpp

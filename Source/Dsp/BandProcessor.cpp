@@ -12,6 +12,7 @@ namespace fourcolor
         nonlinear.prepare (sampleRate, maxBlockSize, channels);
         tone.prepare (sampleRate, channels);
         behavior.prepare (sampleRate, index);
+        space.prepare (sampleRate, maxBlockSize, channels, index);
 
         cleanBuffer.setSize (channels, maxBlockSize);
         behaviorMod.setSize (1, maxBlockSize);
@@ -37,6 +38,7 @@ namespace fourcolor
         nonlinear.reset();
         tone.reset();
         behavior.reset();
+        space.reset();
         cleanDelay.reset();
         cleanBuffer.clear();
 
@@ -61,6 +63,7 @@ namespace fourcolor
         driveSmoothed.setTargetValue (s.drivePercent);
         tone.setTone (s.tone, s.centreHz);
         behavior.setBehavior (s.behavior);
+        space.setAmount (s.spacePercent * 0.01f);
 
         levelGain.setTargetValue (juce::Decibels::decibelsToGain (s.levelDb));
         mixSmoothed.setTargetValue (s.bandMix);
@@ -118,6 +121,11 @@ namespace fourcolor
         tone.processPre (buffer);
         nonlinear.process (buffer, behavior.isActive() ? modPtrs : nullptr);
         tone.processPost (buffer);
+
+        //  Harmonic Space: adds the diffused nonlinear residual to the wet
+        //  path. Skipped entirely at 0% - no CPU spent.
+        if (space.isActive())
+            space.process (buffer, cleanBuffer, n);
 
         //  Mix / level / mute / bypass / solo, all with per-sample fades.
         //  Samples outer, channels inner, so each SmoothedValue advances

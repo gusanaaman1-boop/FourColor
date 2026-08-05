@@ -12,6 +12,7 @@
 
 #include "../Core/ParameterIds.h"
 #include "BehaviorDetector.h"
+#include "HarmonicSpace.h"
 #include "NonlinearStage.h"
 #include "ToneStage.h"
 
@@ -64,6 +65,7 @@ namespace fourcolor
         NonlinearStage nonlinear;
         ToneStage tone;
         BehaviorDetector behavior;
+        HarmonicSpace space;
         juce::AudioBuffer<float> behaviorMod;   // one stereo-linked curve
 
         //  Thiran: allpass interpolation, magnitude-flat at fractional delays.
