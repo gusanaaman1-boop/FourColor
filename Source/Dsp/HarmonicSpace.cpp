@@ -88,6 +88,10 @@ namespace fourcolor
         accCoeff    = 1.0f - std::exp (-1.0f / (0.2f  * (float) sampleRate));
         amountCoeff = 1.0f - std::exp (-1.0f / (0.03f * (float) sampleRate));
 
+        //  The coefficients themselves are smoothed on top of the accumulator,
+        //  so a gate slamming shut cannot step the residual in one sample.
+        coefCoeff   = 1.0f - std::exp (-1.0f / (0.03f * (float) sampleRate));
+
         reset();
     }
 
@@ -101,6 +105,7 @@ namespace fourcolor
             fit[c] = {};
         }
         currentAmount = targetAmount;
+        diffuserPrimed = false;
     }
 
     void HarmonicSpace::setAmount (float amount01) noexcept
@@ -120,6 +125,16 @@ namespace fourcolor
 
         const bool monoSpace = (band == 0) || chans == 1;
 
+        //  Ridge term, relative to the accumulated energy so it is independent
+        //  of level, and the floor below which the fit is frozen rather than
+        //  solved from noise. -80 dBFS of running energy is silence.
+        constexpr float ridge = 1.0e-4f;
+        constexpr float energyFloor = 1.0e-8f;
+
+        //  Below this the diffuser contributes nothing audible, so it is not
+        //  run at all - that is the expensive half of this engine.
+        constexpr float diffuseFloor = 1.0e-4f;
+
         for (int i = 0; i < n; ++i)
         {
             currentAmount += amountCoeff * (targetAmount - currentAmount);
@@ -129,8 +144,11 @@ namespace fourcolor
             //  ride the one Space value.
             const float feedback = 0.15f + 0.30f * a;
             const float outGain  = 0.9f * a;
+            const bool diffusing = a > diffuseFloor;
 
-            //  Two-basis residual per channel (see header).
+            //  Two-basis residual per channel (see header). This runs whatever
+            //  Space is set to, so the coefficients are converged before anyone
+            //  turns the knob up.
             auto residualFor = [this] (int c, float wc, float cc) noexcept
             {
                 const float hc = basisHp[c].processHigh (cc);
@@ -142,23 +160,60 @@ namespace fourcolor
                 f.r0  += accCoeff * (wc * cc - f.r0);
                 f.r1  += accCoeff * (wc * hc - f.r1);
 
-                const float det = f.s00 * f.s11 - f.s01 * f.s01;
-                float g0, g1;
-                if (det > 1.0e-12f)
+                //  Solve only when there is something to solve. In silence the
+                //  accumulators decay towards zero and the system becomes
+                //  arbitrarily ill-conditioned; holding the last good answer is
+                //  both stabler and more musical than chasing noise.
+                const float energy = f.s00 + f.s11;
+                if (energy > energyFloor)
                 {
-                    g0 = (f.r0 * f.s11 - f.r1 * f.s01) / det;
-                    g1 = (f.r1 * f.s00 - f.r0 * f.s01) / det;
-                }
-                else
-                {
-                    g0 = f.r0 / (f.s00 + 1.0e-9f);
-                    g1 = 0.0f;
+                    //  Tikhonov: lambda scales with energy, so conditioning is
+                    //  level-independent and there is no hard determinant cliff.
+                    const float lambda = ridge * energy;
+                    const float a00 = f.s00 + lambda;
+                    const float a11 = f.s11 + lambda;
+                    const float det = a00 * a11 - f.s01 * f.s01;
+
+                    if (det > 1.0e-20f)
+                    {
+                        const float t0 = (f.r0 * a11 - f.r1 * f.s01) / det;
+                        const float t1 = (f.r1 * a00 - f.r0 * f.s01) / det;
+
+                        if (std::isfinite (t0) && std::isfinite (t1))
+                        {
+                            //  Bound first, then approach: clamping the smoothed
+                            //  value would let a spike drag it and then hold it
+                            //  pinned at the limit.
+                            const float b0 = juce::jlimit (0.0f, 4.0f, t0);
+                            const float b1 = juce::jlimit (-4.0f, 4.0f, t1);
+                            f.g0 += coefCoeff * (b0 - f.g0);
+                            f.g1 += coefCoeff * (b1 - f.g1);
+                        }
+                    }
                 }
 
-                g0 = juce::jlimit (0.0f, 4.0f, g0);
-                g1 = juce::jlimit (-4.0f, 4.0f, g1);
-                return wc - g0 * cc - g1 * hc;
+                return wc - f.g0 * cc - f.g1 * hc;
             };
+
+            //  With Space down, keep the estimator fed and leave the wet signal
+            //  exactly as it was.
+            if (! diffusing)
+            {
+                for (int c = 0; c < chans; ++c)
+                    (void) residualFor (c, w[c][i], cl[c][i]);
+
+                //  Empty the delay lines once on the way down, so turning Space
+                //  back up cannot flush out a stale tail from minutes ago.
+                if (diffuserPrimed)
+                {
+                    for (auto& d : diffuser)
+                        d.clear();
+                    diffuserPrimed = false;
+                }
+                continue;
+            }
+
+            diffuserPrimed = true;
 
             if (monoSpace)
             {

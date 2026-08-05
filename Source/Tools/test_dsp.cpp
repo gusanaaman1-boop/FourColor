@@ -19,6 +19,7 @@
 #include "../Core/StateMigration.h"
 #include "../Dsp/ColorEngine.h"
 #include "../Dsp/Crossover.h"
+#include "../Dsp/HarmonicSpace.h"
 #include "../Dsp/NonlinearStage.h"
 #include "../PluginEditor.h"
 #include "../PluginProcessor.h"
@@ -2059,6 +2060,296 @@ namespace
 }
 
 // ================================================================================
+//  Phase 14: the Space estimator stays converged, and switch-on leaks nothing
+// ================================================================================
+namespace
+{
+    const char* const engineNames[] = { "WARM", "IRON", "BITE", "FUZZ" };
+
+    //  Renders the whole engine and keeps EVERY sample from the first one. The
+    //  old Space tests threw the first second away, which is exactly where a
+    //  cold estimator does its damage.
+    std::vector<float> renderFromStart (std::function<void (EngineParameters&, int block)> perBlock,
+                                        std::function<float (int sampleIndex)> source,
+                                        double sr, int block, int blocks,
+                                        int channelsIn = 1)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, channelsIn);
+
+        EngineParameters p;
+        p.autoLevel = false;
+
+        std::vector<float> out;
+        out.reserve ((size_t) (block * blocks));
+
+        AudioBuffer<float> io (channelsIn, block);
+        int s = 0;
+
+        for (int blk = 0; blk < blocks; ++blk)
+        {
+            perBlock (p, blk);
+            engine.setParameters (p);
+
+            for (int i = 0; i < block; ++i, ++s)
+            {
+                const float v = source (s);
+                for (int c = 0; c < channelsIn; ++c)
+                    io.setSample (c, i, v);
+            }
+
+            engine.process (io);
+
+            for (int i = 0; i < block; ++i)
+                out.push_back (io.getSample (0, i));
+        }
+
+        return out;
+    }
+
+    double rmsOfRange (const std::vector<float>& x, size_t first, size_t last)
+    {
+        if (last <= first || last > x.size())
+            return 0.0;
+        double sum = 0.0;
+        for (size_t i = first; i < last; ++i)
+            sum += (double) x[i] * x[i];
+        return std::sqrt (sum / (double) (last - first));
+    }
+}
+
+static void testSpaceEstimatorStaysConverged()
+{
+    section ("Phase 14: Space switch-on leaks no clean source into the halo");
+
+    const double sr = 48000.0;
+    const int block = 256;
+    const int blocks = 400;                       // ~2.1 s
+    const int switchBlock = 200;                  // Space 0 -> 100 halfway
+    const size_t switchSample = (size_t) (switchBlock * block);
+
+    auto sine = [sr] (int s) {
+        return 0.30f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * s / sr);
+    };
+
+    //  The decisive case. At Drive 0 the engines pass the signal through
+    //  untouched (Phase 11), so there IS no nonlinear residual - a correct
+    //  estimator therefore diffuses nothing at all, whatever Space is set to.
+    //  Every dB that comes out is the clean source leaking through the fit.
+    for (int colorIndex = 0; colorIndex < 4; ++colorIndex)
+    {
+        auto configure = [colorIndex] (bool useSpace)
+        {
+            return [colorIndex, useSpace] (EngineParameters& p, int blk)
+            {
+                for (auto& b : p.bands)
+                {
+                    b.color = (ColorType) colorIndex;
+                    b.drive = 0.0f;                       // no residual exists
+                    b.space = (useSpace && blk >= 200) ? 100.0f : 0.0f;
+                }
+            };
+        };
+
+        const auto without = renderFromStart (configure (false), sine, sr, block, blocks);
+        const auto with    = renderFromStart (configure (true),  sine, sr, block, blocks);
+
+        //  Difference over the half second right after the switch, against the
+        //  source level.
+        std::vector<float> diff (with.size());
+        for (size_t i = 0; i < with.size(); ++i)
+            diff[i] = with[i] - without[i];
+
+        const size_t from = switchSample;
+        const size_t to = jmin (with.size(), switchSample + (size_t) (sr * 0.5));
+
+        const double leak = rmsOfRange (diff, from, to);
+        const double reference = rmsOfRange (without, from, to);
+        const double leakDb = Decibels::gainToDecibels (leak / jmax (1.0e-12, reference), -200.0);
+
+        std::printf ("      %-4s: source leaked into the halo at switch-on %.1f dB\n",
+                     engineNames[colorIndex], leakDb);
+
+        check (leakDb < -30.0,
+               String (engineNames[colorIndex])
+                   + ": Drive 0 + Space 100 diffuses no clean source ("
+                   + String (leakDb, 1) + " dB)");
+    }
+}
+
+static void testSpaceWithGatedFuzz()
+{
+    section ("Phase 14: Space survives FUZZ opening and closing its gate");
+
+    const double sr = 48000.0;
+    const int block = 256;
+    const int blocks = 400;
+
+    //  A decaying pluck train: FUZZ's gate opens on each hit and shuts on the
+    //  decay, which is the case that makes the fit chase a moving target.
+    auto pluck = [sr] (int s) {
+        const double phase = std::fmod ((double) s / sr, 0.35);
+        return 0.55f * (float) (std::exp (-phase * 9.0)
+                                * std::sin (2.0 * MathConstants<double>::pi * 320.0 * phase));
+    };
+
+    auto configure = [] (EngineParameters& p, int blk)
+    {
+        for (auto& b : p.bands)
+        {
+            b.color = ColorType::fuzz;
+            b.drive = 80.0f;                     // gate threshold is widest here
+            b.space = blk >= 200 ? 100.0f : 0.0f;
+        }
+    };
+
+    const auto out = renderFromStart (configure, pluck, sr, block, blocks);
+
+    bool finite = true;
+    for (auto v : out)
+        finite = finite && std::isfinite (v);
+
+    //  FUZZ at drive 80 with its gate working produces sample steps of 0.27 FS
+    //  on its own - that is what a gated fuzz IS - so an absolute 0.02 FS budget
+    //  cannot say anything here. The question is whether turning Space up adds
+    //  a discontinuity the material did not already have, so the switch window
+    //  is compared against an EQUAL-LENGTH window of the same material
+    //  immediately before it.
+    const size_t switchSample = (size_t) (200 * block);
+    const auto window = (size_t) (sr * 0.2);
+
+    auto worstStepIn = [&out] (size_t first, size_t last)
+    {
+        double worst = 0.0;
+        const size_t lo = first < 1 ? size_t (1) : first;
+        const size_t hi = last < out.size() ? last : out.size();
+        for (size_t i = lo; i < hi; ++i)
+            worst = jmax (worst, std::abs ((double) out[i] - out[i - 1]));
+        return worst;
+    };
+
+    const double atSwitch = worstStepIn (switchSample, switchSample + window);
+    const double before   = worstStepIn (switchSample - window, switchSample);
+
+    std::printf ("      gated FUZZ: worst step at switch-on %.5f FS,"
+                 " same material just before it %.5f FS\n", atSwitch, before);
+
+    check (finite, "gated FUZZ with Space stays finite throughout");
+    check (atSwitch <= before * 1.05,
+           "turning Space up under a gating FUZZ adds no step the material did not have ("
+               + String (atSwitch, 5) + " vs " + String (before, 5) + ")");
+}
+
+static void testSpaceTailAndSilence()
+{
+    section ("Phase 14: one transient, then silence");
+
+    const double sr = 48000.0;
+    const int block = 256;
+    const int blocks = 300;
+    const double hitEnds = 0.20;                  // the source stops here
+
+    auto oneHit = [sr, hitEnds] (int s) {
+        const double t = (double) s / sr;
+        if (t > hitEnds)
+            return 0.0f;
+        return 0.6f * (float) (std::exp (-t * 22.0)
+                               * std::sin (2.0 * MathConstants<double>::pi * 180.0 * t));
+    };
+
+    auto configure = [] (EngineParameters& p, int)
+    {
+        for (auto& b : p.bands)
+        {
+            b.color = ColorType::bite;
+            b.drive = 70.0f;
+            b.space = 100.0f;                     // on from the very first sample
+        }
+    };
+
+    const auto out = renderFromStart (configure, oneHit, sr, block, blocks);
+
+    //  300 ms after the source stopped, nothing should be left.
+    const auto tailStart = (size_t) ((hitEnds + 0.30) * sr);
+    double tailPeak = 0.0;
+    for (size_t i = tailStart; i < out.size(); ++i)
+        tailPeak = jmax (tailPeak, (double) std::abs (out[i]));
+
+    const double tailDb = Decibels::gainToDecibels (tailPeak, -200.0);
+    std::printf ("      tail 300 ms after the source stopped: %.1f dBFS\n", tailDb);
+
+    check (tailDb < -60.0,
+           "the halo is gone 300 ms after the source stops (" + String (tailDb, 1) + " dBFS)");
+
+    bool finite = true;
+    for (auto v : out)
+        finite = finite && std::isfinite (v);
+    check (finite, "a single transient into silence leaves nothing non-finite");
+}
+
+static void testSpaceCoefficientsAreWellBehaved()
+{
+    section ("Phase 14: the fit coefficients stay bounded and finite");
+
+    const double sr = 48000.0;
+    const int n = 512;
+
+    HarmonicSpace space;
+    space.prepare (sr, n, 2, 1);
+    space.setAmount (0.0f);            // estimator only - the diffuser is idle
+
+    AudioBuffer<float> wet (2, n), clean (2, n);
+    Random rng (99);
+
+    bool finite = true;
+    float worstG0 = 0.0f, worstG1 = 0.0f;
+
+    //  Silence, then signal, then a hard mute, then full scale: the sequence
+    //  that used to drive the solve through an ill-conditioned matrix.
+    for (int stage = 0; stage < 4; ++stage)
+    {
+        for (int blk = 0; blk < 200; ++blk)
+        {
+            for (int i = 0; i < n; ++i)
+            {
+                float c = 0.0f;
+                switch (stage)
+                {
+                    case 0: c = 0.0f; break;                                  // silence
+                    case 1: c = 0.3f * (rng.nextFloat() * 2.0f - 1.0f); break; // noise
+                    case 2: c = 0.0f; break;                                  // hard mute
+                    case 3: c = 0.99f * (rng.nextFloat() * 2.0f - 1.0f); break; // near clip
+                }
+
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    clean.setSample (ch, i, c);
+                    //  A plausible wet: a little gain and a lot of saturation.
+                    wet.setSample (ch, i, std::tanh (c * 2.0f) * 0.8f);
+                }
+            }
+
+            space.process (wet, clean, n);
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const float g0 = space.getFitGain (ch), g1 = space.getFitHpGain (ch);
+                finite = finite && std::isfinite (g0) && std::isfinite (g1);
+                worstG0 = jmax (worstG0, std::abs (g0));
+                worstG1 = jmax (worstG1, std::abs (g1));
+            }
+        }
+    }
+
+    std::printf ("      worst |g0| %.3f, worst |g1| %.3f\n", worstG0, worstG1);
+
+    check (finite, "no fit coefficient ever becomes non-finite");
+    check (worstG0 <= 4.0f && worstG1 <= 4.0f,
+           "fit coefficients stay inside their bounds (|g0| " + String (worstG0, 2)
+               + ", |g1| " + String (worstG1, 2) + ")");
+}
+
+// ================================================================================
 //  Phase 13: state versioning, migration and hostile input
 // ================================================================================
 namespace
@@ -2330,7 +2621,6 @@ static void testStateVersioningAndMigration()
 // ================================================================================
 namespace
 {
-    const char* const engineNames[] = { "WARM", "IRON", "BITE", "FUZZ" };
 
     //  Renders `seconds` of a sine through a fully configured engine and hands
     //  back the settled tail.
@@ -3377,6 +3667,11 @@ int main()
     testSpaceIsHarmonicOnly();
     testSpaceMonoBassAndCorrelation();
     testSpaceDecaysAndZeroCost();
+
+    testSpaceEstimatorStaysConverged();
+    testSpaceWithGatedFuzz();
+    testSpaceTailAndSilence();
+    testSpaceCoefficientsAreWellBehaved();
 
     testDriveZeroIsClean();
     testDriveSweepThroughZero();

@@ -129,9 +129,11 @@ namespace fourcolor
         tone.processPost (buffer);
 
         //  Harmonic Space: adds the diffused nonlinear residual to the wet
-        //  path. Skipped entirely at 0% - no CPU spent.
-        if (space.isActive())
-            space.process (buffer, cleanBuffer, n);
+        //  path. Called on every block, whatever Space is set to, because
+        //  the estimator has to stay converged: starting it cold sends the
+        //  clean source into the diffuser for the first fifth of a second.
+        //  HarmonicSpace skips its own diffuser when the amount is down.
+        space.process (buffer, cleanBuffer, n);
 
         //  Mix / level / mute / bypass / solo, all with per-sample fades.
         //  Samples outer, channels inner, so each SmoothedValue advances
