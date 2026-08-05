@@ -60,8 +60,12 @@ namespace fourcolor::ui
         const bool sparks     = propBool (slider, "sparks");
         const bool spread     = propBool (slider, "spreadArcs");
 
-        const bool hovering = slider.isMouseOverOrDragging() && slider.isEnabled();
-        const bool dragging = slider.isMouseButtonDown();
+        //  "forceHover"/"forceDrag" let the screenshot tool render the real
+        //  hover and drag styling without faking mouse events - the drawing
+        //  path stays identical to a live interaction.
+        const bool hovering = (slider.isMouseOverOrDragging() || propBool (slider, "forceHover"))
+                              && slider.isEnabled();
+        const bool dragging = slider.isMouseButtonDown() || propBool (slider, "forceDrag");
 
         const float start = metric::arcStart, end = metric::arcEnd;
         const float angle = start + sliderPos * (end - start);
@@ -225,7 +229,7 @@ namespace fourcolor::ui
         //  quiet through the centre.
         const auto area = juce::Rectangle<int> (x, y, w, h).toFloat();
         const float trackY = area.getCentreY();
-        const bool dragging = slider.isMouseButtonDown();
+        const bool dragging = slider.isMouseButtonDown() || propBool (slider, "forceDrag");
 
         //  Tick marks above the track.
         g.setColour (tokens::borderNormal);
@@ -278,8 +282,8 @@ namespace fourcolor::ui
 
         g.setColour (tokens::controlInner);
         g.fillEllipse (juce::Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (thumbCentre));
-        g.setColour (slider.isMouseOverOrDragging() ? tokens::textPrimary
-                                                    : juce::Colour (0xffaeb4bc));
+        g.setColour (slider.isMouseOverOrDragging() || dragging ? tokens::textPrimary
+                                                                : juce::Colour (0xffaeb4bc));
         g.drawEllipse (juce::Rectangle<float> (r * 2.0f, r * 2.0f).withCentre (thumbCentre)
                            .reduced (1.0f), 2.0f);
     }

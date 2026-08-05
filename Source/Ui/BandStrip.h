@@ -25,6 +25,10 @@ namespace fourcolor::ui
         //  Live output level of the selected band, for the DRIVE sparks.
         void setEnergy (float level01);
 
+        //  QA affordance for the screenshot tool (see Knob::setInteractionPreview).
+        enum class Control { none, drive, behavior, tone, space };
+        void setInteractionPreview (Control control, bool hover, bool drag);
+
         //  Raised while the user drags a control here, so the analyzer can
         //  emphasise the matching region.
         std::function<void (int emphasisKind, int band)> onEmphasisChanged;

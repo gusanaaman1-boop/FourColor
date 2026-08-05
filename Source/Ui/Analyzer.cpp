@@ -287,37 +287,65 @@ namespace fourcolor::ui
             return juce::jlimit (0.0f, halfH, juce::jmap (db, floorDb, ceilDb, 0.0f, halfH));
         };
 
-        //  Centre (MID) contour.
-        juce::Path centreLine;
-        for (int col = 0; col < numColumns; ++col)
+        auto columnX = [&area] (int col)
         {
-            const float px = area.getX() + area.getWidth() * ((float) col + 0.5f) / numColumns;
-            const float py = mid - heightFor (midDb[(size_t) col]);
-            if (col == 0) centreLine.startNewSubPath (area.getX(), py);
-            else          centreLine.lineTo (px, py);
-        }
-        centreLine.lineTo (area.getRight(), mid - heightFor (midDb[(size_t) (numColumns - 1)]));
+            return area.getX() + area.getWidth() * ((float) col + 0.5f) / numColumns;
+        };
 
-        //  Side contours: 3 outlines whose distance from the centre shape is
-        //  the MEASURED side energy. Below the low crossover the DSP keeps the
-        //  signal mono, so these close onto the centre on their own.
-        juce::Path sideLines[3];
-        for (int k = 0; k < 3; ++k)
+        //  Each shape is built ONCE as a single path containing both the upper
+        //  and the mirrored lower half - one fill and one stroke per band
+        //  instead of two, which is what brings the repaint cost down.
+        juce::Path centreShape;   // closed, mirrored: the filled body
+        juce::Path centreOutline; // upper + lower contours, for stroking
         {
-            const float weight = 0.45f + 0.30f * (float) k;   // 0.45 / 0.75 / 1.05
-            for (int col = 0; col < numColumns; ++col)
+            centreShape.startNewSubPath (area.getX(), mid - heightFor (midDb[0]));
+            centreOutline.startNewSubPath (area.getX(), mid - heightFor (midDb[0]));
+            for (int col = 1; col < numColumns; ++col)
             {
-                const float px = area.getX() + area.getWidth() * ((float) col + 0.5f) / numColumns;
-                const float centreH = heightFor (midDb[(size_t) col]);
-                const float sideH   = heightFor (sideDb[(size_t) col]);
-                const float py = mid - (centreH + weight * sideH * 0.55f);
-                if (col == 0) sideLines[k].startNewSubPath (area.getX(), py);
-                else          sideLines[k].lineTo (px, py);
+                const float py = mid - heightFor (midDb[(size_t) col]);
+                centreShape.lineTo (columnX (col), py);
+                centreOutline.lineTo (columnX (col), py);
             }
+            const float lastH = heightFor (midDb[(size_t) (numColumns - 1)]);
+            centreShape.lineTo (area.getRight(), mid - lastH);
+            centreOutline.lineTo (area.getRight(), mid - lastH);
+
+            centreShape.lineTo (area.getRight(), mid + lastH);
+            centreOutline.startNewSubPath (area.getRight(), mid + lastH);
+            for (int col = numColumns - 1; col >= 1; --col)
+            {
+                const float py = mid + heightFor (midDb[(size_t) col]);
+                centreShape.lineTo (columnX (col), py);
+                centreOutline.lineTo (columnX (col), py);
+            }
+            centreShape.lineTo (area.getX(), mid + heightFor (midDb[0]));
+            centreOutline.lineTo (area.getX(), mid + heightFor (midDb[0]));
+            centreShape.closeSubPath();
+        }
+
+        //  Side contours: outlines whose distance from the centre shape is the
+        //  MEASURED side energy. Below the low crossover the DSP keeps the
+        //  signal mono, so these close onto the centre on their own.
+        juce::Path sideOutline[2];
+        for (int k = 0; k < 2; ++k)
+        {
+            const float weight = 0.50f + 0.42f * (float) k;
+            auto heightAt = [&] (int col)
+            {
+                return heightFor (midDb[(size_t) col])
+                     + weight * heightFor (sideDb[(size_t) col]) * 0.55f;
+            };
+
+            sideOutline[k].startNewSubPath (area.getX(), mid - heightAt (0));
+            for (int col = 1; col < numColumns; ++col)
+                sideOutline[k].lineTo (columnX (col), mid - heightAt (col));
+
+            sideOutline[k].startNewSubPath (area.getX(), mid + heightAt (0));
+            for (int col = 1; col < numColumns; ++col)
+                sideOutline[k].lineTo (columnX (col), mid + heightAt (col));
         }
 
         const float edges[5] = { minHz, cutValues[0], cutValues[1], cutValues[2], maxHz };
-        const auto flip = juce::AffineTransform::verticalFlip (mid * 2.0f);
 
         for (int b = 0; b < numBands; ++b)
         {
@@ -341,30 +369,24 @@ namespace fourcolor::ui
             const float botAlpha = (b == 0 ? 0.08f : b == 1 ? 0.07f : b == 2 ? 0.09f : 0.07f)
                                  * (isSel ? 1.0f : 0.72f);
 
-            juce::Path fill (centreLine);
-            fill.lineTo (area.getRight(), mid);
-            fill.lineTo (area.getX(), mid);
-            fill.closeSubPath();
-
+            //  Symmetric vertical gradient: dense at the contour, faint at the
+            //  centre line, mirrored below.
             juce::ColourGradient grad (c.withAlpha (topAlpha), 0.0f, mid - halfH,
-                                       c.withAlpha (botAlpha), 0.0f, mid, false);
+                                       c.withAlpha (topAlpha), 0.0f, mid + halfH, false);
+            grad.addColour (0.5, c.withAlpha (botAlpha));
             g.setGradientFill (grad);
-            g.fillPath (fill);
-            g.setGradientFill (grad);
-            g.fillPath (fill, flip);
+            g.fillPath (centreShape);
 
             //  Side contours.
-            for (int k = 0; k < 3; ++k)
+            for (int k = 0; k < 2; ++k)
             {
-                g.setColour (c.withAlpha ((isSel ? 0.34f : 0.16f) * (1.0f - 0.22f * k)));
-                g.strokePath (sideLines[k], juce::PathStrokeType (1.0f));
-                g.strokePath (sideLines[k], juce::PathStrokeType (1.0f), flip);
+                g.setColour (c.withAlpha ((isSel ? 0.34f : 0.16f) * (1.0f - 0.20f * k)));
+                g.strokePath (sideOutline[k], juce::PathStrokeType (1.0f));
             }
 
             //  Main contour.
             g.setColour (c.withAlpha (isSel ? 0.98f : 0.70f));
-            g.strokePath (centreLine, juce::PathStrokeType (isSel ? 1.4f : 1.1f));
-            g.strokePath (centreLine, juce::PathStrokeType (isSel ? 1.4f : 1.1f), flip);
+            g.strokePath (centreOutline, juce::PathStrokeType (isSel ? 1.4f : 1.1f));
 
             //  Optional residual layer - only if a real provider is installed.
             if (residualProvider != nullptr)
@@ -373,16 +395,15 @@ namespace fourcolor::ui
                 if (residualProvider (b, residual) && (int) residual.size() == numColumns)
                 {
                     juce::Path rp;
-                    for (int col = 0; col < numColumns; ++col)
-                    {
-                        const float px = area.getX() + area.getWidth() * ((float) col + 0.5f) / numColumns;
-                        const float py = mid - heightFor (residual[(size_t) col]);
-                        if (col == 0) rp.startNewSubPath (area.getX(), py);
-                        else          rp.lineTo (px, py);
-                    }
+                    rp.startNewSubPath (area.getX(), mid - heightFor (residual[0]));
+                    for (int col = 1; col < numColumns; ++col)
+                        rp.lineTo (columnX (col), mid - heightFor (residual[(size_t) col]));
+                    rp.startNewSubPath (area.getX(), mid + heightFor (residual[0]));
+                    for (int col = 1; col < numColumns; ++col)
+                        rp.lineTo (columnX (col), mid + heightFor (residual[(size_t) col]));
+
                     g.setColour (c.withAlpha (isSel ? 0.45f : 0.20f));
                     g.strokePath (rp, juce::PathStrokeType (0.8f));
-                    g.strokePath (rp, juce::PathStrokeType (0.8f), flip);
                 }
             }
         }

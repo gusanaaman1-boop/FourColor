@@ -70,6 +70,15 @@ namespace fourcolor::ui
         }
     }
 
+    void Knob::setInteractionPreview (bool hover, bool drag)
+    {
+        previewDrag = drag;
+        slider.getProperties().set ("forceHover", hover);
+        slider.getProperties().set ("forceDrag", drag);
+        slider.repaint();
+        repaint();
+    }
+
     void Knob::setSideCaptions (const juce::String& left, const juce::String& right)
     {
         leftCaption = left;
@@ -126,7 +135,7 @@ namespace fourcolor::ui
         }
 
         //  While dragging, the number is framed in the control's own colour.
-        if (slider.isMouseButtonDown())
+        if (slider.isMouseButtonDown() || previewDrag)
         {
             const float fw = juce::jmin (valueRow.getWidth(), 72.0f);
             g.setColour (accentColour.withAlpha (0.8f));

@@ -48,6 +48,8 @@ namespace fourcolor::ui
 
         behaviorSlider.setSliderStyle (juce::Slider::LinearHorizontal);
         behaviorSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+        //  The value must never jump to the click position on mouse-down.
+        behaviorSlider.setSliderSnapsToMousePosition (false);
         behaviorSlider.setTooltip ("Shift saturation response between body and transients");
         behaviorSlider.setVelocityModeParameters (1.0, 1, 0.08, true,
                                                   juce::ModifierKeys::ctrlModifier);
@@ -90,6 +92,33 @@ namespace fourcolor::ui
         for (auto* k : { drive.get(), tone.get(), space.get(), bandMix.get(), level.get() })
             k->setAlpha (draggingKnob == nullptr || k == draggingKnob ? 1.0f : 0.82f);
         behaviorSlider.setAlpha (draggingKnob == nullptr ? 1.0f : 0.82f);
+
+        repaint();
+    }
+
+    void BandStrip::setInteractionPreview (Control control, bool hover, bool drag)
+    {
+        auto* knob = control == Control::drive ? drive.get()
+                   : control == Control::tone  ? tone.get()
+                   : control == Control::space ? space.get()
+                                               : nullptr;
+
+        for (auto* k : { drive.get(), tone.get(), space.get(), bandMix.get(), level.get() })
+            k->setInteractionPreview (k == knob && hover, k == knob && drag);
+
+        if (control == Control::behavior)
+        {
+            behaviorSlider.getProperties().set ("forceHover", hover);
+            behaviorSlider.getProperties().set ("forceDrag", drag);
+            behaviorDragging = drag;
+            if (drag && onEmphasisChanged)
+                onEmphasisChanged (behaviorSlider.getValue() < 0.0 ? 2 : 3, band);
+            behaviorSlider.repaint();
+        }
+        else if (knob != nullptr && drag)
+        {
+            setDragging (knob, true);
+        }
 
         repaint();
     }

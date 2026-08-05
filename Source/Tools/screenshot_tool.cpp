@@ -26,6 +26,11 @@ namespace
         int width, height;
         int selectedBand;
         bool driven;          // push audio + hot drives so curves/meters differ
+
+        //  QA states: which control to show under the mouse or mid-drag, and
+        //  parameter overrides applied before rendering.
+        enum class State { plain, hoverDrive, dragBehaviorAttack, highSpace };
+        State state = State::plain;
     };
 
     void renderVariant (const Variant& v, const File& outDir)
@@ -85,6 +90,20 @@ namespace
             }
         }
 
+        //  State-specific parameter overrides.
+        {
+            auto set = [&proc] (const String& id, float plain)
+            {
+                auto* p = proc.apvts.getParameter (id);
+                p->setValueNotifyingHost (p->convertTo0to1 (plain));
+            };
+
+            if (v.state == Variant::State::dragBehaviorAttack)
+                set (param::band (v.selectedBand, param::behavior), 68.0f);
+            else if (v.state == Variant::State::highSpace)
+                set (param::band (v.selectedBand, param::space), 86.0f);
+        }
+
         proc.apvts.state.setProperty ("selectedBand", v.selectedBand, nullptr);
         proc.apvts.state.setProperty ("editorWidth", v.width, nullptr);
         proc.apvts.state.setProperty ("editorHeight", v.height, nullptr);
@@ -95,6 +114,21 @@ namespace
         //  Let timers (meter decay, display refresh) fire a few times.
         for (int i = 0; i < 12; ++i)
             MessageManager::getInstance()->runDispatchLoopUntil (20);
+
+        //  Hover / drag states are rendered through the components' own
+        //  styling path rather than by faking mouse events.
+        if (auto* fc = dynamic_cast<FourColorEditor*> (editor.get()))
+        {
+            using Control = ui::BandStrip::Control;
+
+            if (v.state == Variant::State::hoverDrive)
+                fc->getBandStrip().setInteractionPreview (Control::drive, true, false);
+            else if (v.state == Variant::State::dragBehaviorAttack)
+                fc->getBandStrip().setInteractionPreview (Control::behavior, true, true);
+
+            for (int i = 0; i < 4; ++i)
+                MessageManager::getInstance()->runDispatchLoopUntil (16);
+        }
 
         auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
 
@@ -126,13 +160,23 @@ int main (int argc, char* argv[])
                                  : File::getCurrentWorkingDirectory().getChildFile ("ui-shots");
     outDir.createDirectory();
 
+    using S = Variant::State;
     const Variant variants[] = {
-        { "fourcolor-min-900x560.png",      900,  560, 0, true  },
-        { "fourcolor-default-980x620.png",  980,  620, 0, true  },
-        { "fourcolor-band-hmid.png",        980,  620, 2, true  },
-        { "fourcolor-band-high.png",        980,  620, 3, true  },
-        { "fourcolor-large-1400x900.png",  1400,  900, 1, true  },
-        { "fourcolor-init.png",             980,  620, 0, false },
+        //  Sizes.
+        { "fourcolor-min-900x560.png",       900,  560, 0, true  },
+        { "fourcolor-default-980x620.png",   980,  620, 0, true  },
+        { "fourcolor-large-1400x900.png",   1400,  900, 1, true  },
+        //  Each band selected.
+        { "fourcolor-band1-low.png",         980,  620, 0, true  },
+        { "fourcolor-band2-lowmid.png",      980,  620, 1, true  },
+        { "fourcolor-band3-highmid.png",     980,  620, 2, true  },
+        { "fourcolor-band4-high.png",        980,  620, 3, true  },
+        //  Interaction states.
+        { "fourcolor-hover-drive.png",       980,  620, 2, true, S::hoverDrive },
+        { "fourcolor-drag-behavior-attack.png", 980, 620, 2, true, S::dragBehaviorAttack },
+        { "fourcolor-space-high.png",        980,  620, 3, true, S::highSpace },
+        //  Silence: nothing should be animating.
+        { "fourcolor-init.png",              980,  620, 0, false },
     };
 
     std::printf ("FOUR COLOR screenshot set -> %s\n", outDir.getFullPathName().toRawUTF8());

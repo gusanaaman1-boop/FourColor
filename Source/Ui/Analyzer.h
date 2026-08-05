@@ -81,7 +81,7 @@ namespace fourcolor::ui
 
         //  --- analysis -----------------------------------------------------------
         static constexpr int fftOrder = 11, fftSize = 1 << fftOrder;   // 2048
-        static constexpr int numColumns = 320;
+        static constexpr int numColumns = 240;
 
         juce::dsp::FFT fft { fftOrder };
         std::vector<float> window   = std::vector<float> ((size_t) fftSize, 0.0f);

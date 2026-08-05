@@ -24,6 +24,11 @@ namespace fourcolor
         void paint (juce::Graphics&) override;
         void resized() override;
 
+        //  QA affordance for the screenshot tool: render the real hover/drag
+        //  styling of one selected-band control without synthesising events.
+        ui::BandStrip& getBandStrip() noexcept { return bandStrip; }
+        ui::Analyzer& getAnalyzer() noexcept   { return analyzer; }
+
     private:
         void timerCallback() override;
         void selectBand (int band);

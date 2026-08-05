@@ -36,6 +36,11 @@ namespace fourcolor::ui
         //  Captions flanking the value row, e.g. DARK / BRIGHT.
         void setSideCaptions (const juce::String& left, const juce::String& right);
 
+        //  QA affordance used by the screenshot tool: renders the real hover /
+        //  drag styling without synthesising mouse events. It changes nothing
+        //  else - the same drawing path serves a live interaction.
+        void setInteractionPreview (bool hover, bool drag);
+
         //  Fired when the user starts/stops dragging, so the owning panel can
         //  dim its siblings.
         std::function<void (bool isDragging)> onDragStateChanged;
@@ -54,6 +59,7 @@ namespace fourcolor::ui
         juce::String caption, leftCaption, rightCaption;
         juce::Colour accentColour;
         Size knobSize;
+        bool previewDrag = false;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Knob)
     };

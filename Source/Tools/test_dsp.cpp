@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cmath>
 #include <functional>
+#include <set>
 #include <vector>
 
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -17,6 +18,7 @@
 #include "../Dsp/ColorEngine.h"
 #include "../Dsp/Crossover.h"
 #include "../Dsp/NonlinearStage.h"
+#include "../PluginEditor.h"
 #include "../PluginProcessor.h"
 
 using namespace juce;
@@ -2162,6 +2164,178 @@ static void testCpuBudget()
 }
 
 // ================================================================================
+// UI regression — the interface must not cost the audio path anything, must
+// render at every supported size, and must not disturb state or parameters.
+// ================================================================================
+static void testEditorSizesAndState()
+{
+    section ("UI: editor renders at every supported size, state survives");
+
+    FourColorProcessor proc;
+    proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+    proc.prepareToPlay (48000.0, 512);
+
+    //  Scatter a state, open the editor, and confirm nothing moved.
+    auto set = [&proc] (const String& id, float plain)
+    {
+        auto* p = proc.apvts.getParameter (id);
+        p->setValueNotifyingHost (p->convertTo0to1 (plain));
+    };
+    set (param::band (2, param::color), (float) (int) ColorType::bite);
+    set (param::band (2, param::drive), 65.0f);
+    set (param::band (3, param::level), -4.0f);
+    set (param::xover2, 1200.0f);
+
+    MemoryBlock before;
+    proc.getStateInformation (before);
+
+    const std::pair<int, int> sizes[] = { { 900, 560 }, { 980, 620 }, { 1400, 900 } };
+    for (auto [w, h] : sizes)
+    {
+        std::unique_ptr<AudioProcessorEditor> editor (proc.createEditor());
+        editor->setSize (w, h);
+
+        for (int i = 0; i < 6; ++i)
+            MessageManager::getInstance()->runDispatchLoopUntil (10);
+
+        auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 1.0f);
+        check (image.getWidth() == w && image.getHeight() == h,
+               "editor renders at " + String (w) + "x" + String (h));
+
+        //  Nothing may be left blank: sample the interior for varied pixels.
+        std::set<uint32> distinct;
+        for (int y = 10; y < h - 10; y += 7)
+            for (int x = 10; x < w - 10; x += 7)
+                distinct.insert (image.getPixelAt (x, y).getARGB());
+        check (distinct.size() > 40, "  content is drawn at " + String (w) + "x" + String (h)
+                                         + " (" + String ((int) distinct.size()) + " distinct samples)");
+    }
+
+    MemoryBlock after;
+    proc.getStateInformation (after);
+
+    //  The editor stores its own size in the state tree, so compare the
+    //  parameters rather than the raw blob.
+    FourColorProcessor reloaded;
+    reloaded.setStateInformation (after.getData(), (int) after.getSize());
+    auto value = [] (FourColorProcessor& p, const String& id)
+    {
+        auto* q = p.apvts.getParameter (id);
+        return q->convertFrom0to1 (q->getValue());
+    };
+    checkNear (value (reloaded, param::band (2, param::drive)), 65.0, 0.1,
+               "opening the editor left band 2 drive untouched");
+    checkNear (value (reloaded, param::xover2), 1200.0, 1.0,
+               "opening the editor left crossover 2 untouched");
+    checkNear (value (reloaded, param::band (3, param::level)), -4.0, 0.1,
+               "opening the editor left band 3 level untouched");
+}
+
+static void testSpectrumTapIsAudioSafe()
+{
+    section ("UI: spectrum tap costs the audio thread no allocations");
+
+    FourColorProcessor proc;
+    proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+    proc.prepareToPlay (48000.0, 512);
+
+    MidiBuffer midi;
+    AudioBuffer<float> buffer (2, 512);
+    for (int i = 0; i < 4; ++i)
+        proc.processBlock (buffer, midi);
+
+    //  Nobody is draining the FIFO: the writer must stay allocation-free and
+    //  finite even when the reader never runs (editor closed).
+    allocationCount.store (0);
+    trackAllocations.store (true);
+    for (int blk = 0; blk < 200; ++blk)
+    {
+        for (int i = 0; i < 512; ++i)
+            for (int c = 0; c < 2; ++c)
+                buffer.setSample (c, i, 0.3f * (float) std::sin (0.05 * (blk * 512 + i)));
+        proc.processBlock (buffer, midi);
+    }
+    trackAllocations.store (false);
+
+    check (allocationCount.load() == 0,
+           "processBlock with the spectrum tap allocates nothing (counted "
+               + String (allocationCount.load()) + ")");
+
+    //  And the reader gets real frames back.
+    std::vector<float> frames (2048 * 2, 0.0f);
+    const int got = proc.readSpectrumFrames (frames.data(), 2048);
+    check (got > 0, "spectrum tap delivers frames to the editor (" + String (got) + ")");
+
+    bool nonZero = false;
+    for (int i = 0; i < got * 2; ++i)
+        nonZero = nonZero || std::abs (frames[(size_t) i]) > 1.0e-6f;
+    check (nonZero, "delivered frames carry real audio, not zeros");
+}
+
+static void testAnalyzerCpu()
+{
+    section ("UI: analyzer CPU");
+
+    FourColorProcessor proc;
+    proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+    proc.prepareToPlay (48000.0, 512);
+
+    std::unique_ptr<AudioProcessorEditor> editor (proc.createEditor());
+    editor->setSize (980, 620);
+
+    MidiBuffer midi;
+    AudioBuffer<float> audio (2, 512);
+    int sampleIndex = 0;
+    auto pushAudio = [&]
+    {
+        for (int i = 0; i < 512; ++i, ++sampleIndex)
+            for (int c = 0; c < 2; ++c)
+                audio.setSample (c, i, 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi
+                                                                * 220.0 * sampleIndex / 48000.0));
+        proc.processBlock (audio, midi);
+    };
+
+    for (int i = 0; i < 10; ++i) { pushAudio(); }
+    for (int i = 0; i < 8; ++i) MessageManager::getInstance()->runDispatchLoopUntil (10);
+
+    constexpr int frames = 120;
+
+    auto measure = [&] (Component& target)
+    {
+        const auto start = Time::getHighResolutionTicks();
+        for (int f = 0; f < frames; ++f)
+        {
+            for (int b = 0; b < 3; ++b) pushAudio();      // ~32 ms of audio
+            MessageManager::getInstance()->runDispatchLoopUntil (1);
+            auto image = target.createComponentSnapshot (target.getLocalBounds(), true, 1.0f);
+            juce::ignoreUnused (image);
+        }
+        return Time::highResolutionTicksToSeconds (Time::getHighResolutionTicks() - start)
+             * 1000.0 / frames;
+    };
+
+    //  The analyzer is the only surface that repaints every frame; the rest of
+    //  the editor redraws only when something changes. Both are reported.
+    auto* fc = dynamic_cast<FourColorEditor*> (editor.get());
+    const double analyzerMs = fc != nullptr ? measure (fc->getAnalyzer()) : 0.0;
+    const double wholeMs = measure (*editor);
+
+    const double analyzerLoad = analyzerMs * 36.0 / 1000.0 * 100.0;
+    const double wholeLoad = wholeMs * 36.0 / 1000.0 * 100.0;
+
+    std::printf ("      analyzer only : %.2f ms/frame -> %.1f%% of one core at 36 FPS\n",
+                 analyzerMs, analyzerLoad);
+    std::printf ("      whole editor  : %.2f ms/frame -> %.1f%% of one core (worst case,\n"
+                 "                      every surface forced to redraw each frame)\n",
+                 wholeMs, wholeLoad);
+
+    check (analyzerLoad < 15.0, "analyzer repaint stays under 15% of one core ("
+                                    + String (analyzerLoad, 1) + "%)");
+    check (wholeLoad < 40.0, "forced full-editor redraw stays under 40% of one core ("
+                                 + String (wholeLoad, 1) + "%)");
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -2203,6 +2377,10 @@ int main()
 
     testPresets();
     testCpuBudget();
+
+    testEditorSizesAndState();
+    testSpectrumTapIsAudioSafe();
+    testAnalyzerCpu();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;
