@@ -9,6 +9,11 @@ namespace fourcolor::ui
         slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
         slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 74, 16);
         slider.setColour (juce::Slider::rotarySliderFillColourId, accent);
+        //  Plain dim value text, no box (explicit so it survives any
+        //  LookAndFeel attach order).
+        slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+        slider.setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+        slider.setColour (juce::Slider::textBoxTextColourId, colour::textDim);
         slider.setVelocityModeParameters (1.0, 1, 0.09, true,
                                           juce::ModifierKeys::ctrlModifier);
         if (tooltip.isNotEmpty())

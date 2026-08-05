@@ -54,16 +54,30 @@ namespace
             set (param::band (0, param::space), 25.0f);
             set (param::band (3, param::level), -4.0f);
 
-            //  Deterministic warm-up so the meters hold real block peaks.
+            //  Deterministic broadband warm-up (a pink-ish bed of sines) so the
+            //  spectrum display and meters show a full, real picture.
             MidiBuffer midi;
             AudioBuffer<float> buf (2, 512);
             int s = 0;
-            for (int blk = 0; blk < 30; ++blk)
+
+            struct Partial { float freq, amp, phase; };
+            std::vector<Partial> partials;
+            {
+                Random rng (7);
+                for (float f = 40.0f; f < 18000.0f; f *= 1.16f)
+                    partials.push_back ({ f * (0.97f + 0.06f * rng.nextFloat()),
+                                          0.55f / std::sqrt (f / 40.0f),
+                                          rng.nextFloat() * MathConstants<float>::twoPi });
+            }
+
+            for (int blk = 0; blk < 40; ++blk)
             {
                 for (int i = 0; i < 512; ++i, ++s)
                 {
-                    const float x = 0.4f * std::sin (2.0f * MathConstants<float>::pi * 180.0f * s / 48000.0f)
-                                  + 0.2f * std::sin (2.0f * MathConstants<float>::pi * 2800.0f * s / 48000.0f);
+                    float x = 0.0f;
+                    for (const auto& p : partials)
+                        x += p.amp * std::sin (MathConstants<float>::twoPi * p.freq * s / 48000.0f + p.phase);
+                    x *= 0.16f;
                     buf.setSample (0, i, x);
                     buf.setSample (1, i, x);
                 }

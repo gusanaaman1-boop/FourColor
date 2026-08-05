@@ -135,6 +135,8 @@ namespace fourcolor
         const float* clean[2] = { cleanBuffer.getReadPointer (0),
                                   chans > 1 ? cleanBuffer.getReadPointer (1) : nullptr };
 
+        float blockPeak = 0.0f;
+
         for (int i = 0; i < n; ++i)
         {
             const float mix  = mixSmoothed.getNextValue();
@@ -151,7 +153,11 @@ namespace fourcolor
                 //  bands reconstruct the input exactly.
                 const float out = leveled + byp * (clean[c][i] - leveled);
                 wet[c][i] = out * mute * solo;
+                blockPeak = juce::jmax (blockPeak, std::abs (wet[c][i]));
             }
         }
+
+        if (blockPeak > outputPeak.load (std::memory_order_relaxed))
+            outputPeak.store (blockPeak, std::memory_order_relaxed);
     }
 }

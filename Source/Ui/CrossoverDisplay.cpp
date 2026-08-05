@@ -1,87 +1,149 @@
 #include "CrossoverDisplay.h"
 
+#include "../PluginProcessor.h"
+
 namespace fourcolor::ui
 {
     namespace
     {
         constexpr float minHz = 20.0f, maxHz = 20000.0f;
+        constexpr float tagHeight = 26.0f;      // frequency boxes above the plot
+        constexpr float axisWidth = 34.0f;      // dB scale on the left
+        constexpr float bottomAxis = 20.0f;     // frequency labels
 
-        //  |LR4| magnitudes: an LR4 low-pass is a squared 2nd-order Butterworth,
-        //  so |H| = 1 / (1 + (f/fc)^4) exactly.
-        inline double lr4Low (double f, double fc)
+        juce::String hzText (float hz)
         {
-            const double r = std::pow (f / fc, 4.0);
-            return 1.0 / (1.0 + r);
-        }
-        inline double lr4High (double f, double fc)
-        {
-            const double r = std::pow (f / fc, 4.0);
-            return r / (1.0 + r);
+            return hz >= 1000.0f ? juce::String (hz / 1000.0f, 2) + " kHz"
+                                 : juce::String ((int) std::round (hz)) + " Hz";
         }
     }
 
-    CrossoverDisplay::CrossoverDisplay (juce::AudioProcessorValueTreeState& apvts)
-        : state (apvts)
+    CrossoverDisplay::CrossoverDisplay (FourColorProcessor& processor)
+        : proc (processor), state (processor.apvts)
     {
+        for (int i = 0; i < fftSize; ++i)
+            window[(size_t) i] = 0.5f - 0.5f * std::cos (2.0f * juce::MathConstants<float>::pi * i / (fftSize - 1));
+
         const char* cutIds[3] = { param::xover1, param::xover2, param::xover3 };
         for (int i = 0; i < 3; ++i)
         {
             auto* p = state.getParameter (cutIds[i]);
             jassert (p != nullptr);
-            cutValues[i] = p->convertFrom0to1 (p->getValue());
 
             cutAttachments[i] = std::make_unique<juce::ParameterAttachment> (
                 *p,
-                [this, i] (float newValue)
-                {
-                    cutValues[i] = newValue;
-                    repaint();
-                },
+                [this, i] (float newValue) { cutValues[i] = newValue; repaint(); },
                 nullptr);
             cutAttachments[i]->sendInitialUpdate();
         }
 
-        for (int b = 0; b < numBands; ++b)
-        {
-            auto& bb = bandButtons[b];
-            for (auto* button : { &bb.solo, &bb.mute, &bb.bypass })
-            {
-                button->setClickingTogglesState (true);
-                button->setColour (juce::TextButton::buttonOnColourId,
-                                   colour::band[b].withAlpha (0.85f));
-                addAndMakeVisible (*button);
-            }
-            bb.solo.setTooltip ("Solo band");
-            bb.mute.setTooltip ("Mute band");
-            bb.bypass.setTooltip ("Bypass band (passes the clean band)");
-
-            using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
-            bb.aSolo   = std::make_unique<BA> (state, param::band (b, param::solo), bb.solo);
-            bb.aMute   = std::make_unique<BA> (state, param::band (b, param::mute), bb.mute);
-            bb.aBypass = std::make_unique<BA> (state, param::band (b, param::bypass), bb.bypass);
-        }
-
-        //  Drive/level readouts change without notifying this component, so a
-        //  modest refresh keeps them honest.
-        startTimerHz (15);
+        startTimerHz (30);
     }
 
     CrossoverDisplay::~CrossoverDisplay() = default;
 
-    void CrossoverDisplay::timerCallback() { repaint(); }
-
-    void CrossoverDisplay::setSelectedBand (int band)
+    void CrossoverDisplay::updateSpectrum()
     {
-        selectedBand = juce::jlimit (0, numBands - 1, band);
+        //  Drain the processor's tap into the ring.
+        float chunk[1024];
+        for (;;)
+        {
+            const int got = proc.readSpectrumSamples (chunk, 1024);
+            if (got == 0)
+                break;
+            for (int i = 0; i < got; ++i)
+            {
+                sampleRing[(size_t) ringPos] = chunk[i];
+                ringPos = (ringPos + 1) % fftSize;
+            }
+        }
+
+        //  Windowed FFT of the most recent fftSize samples.
+        for (int i = 0; i < fftSize; ++i)
+            fftScratch[(size_t) i] = sampleRing[(size_t) ((ringPos + i) % fftSize)] * window[(size_t) i];
+        std::fill (fftScratch.begin() + fftSize, fftScratch.end(), 0.0f);
+        fft.performRealOnlyForwardTransform (fftScratch.data());
+
+        const double sr = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0;
+        const double binHz = sr / fftSize;
+
+        //  Column magnitudes on the log axis. Narrow columns (low frequencies,
+        //  where one FFT bin spans many pixels) interpolate between bins so
+        //  the curve doesn't staircase; wide columns take the bin peak.
+        float raw[numColumns];
+
+        auto magAt = [this] (float bin)
+        {
+            const int b0 = juce::jlimit (1, fftSize / 2 - 2, (int) bin);
+            const float frac = juce::jlimit (0.0f, 1.0f, bin - (float) b0);
+
+            auto binMag = [this] (int b)
+            {
+                const float re = fftScratch[(size_t) (2 * b)];
+                const float im = fftScratch[(size_t) (2 * b + 1)];
+                return std::sqrt (re * re + im * im);
+            };
+            return binMag (b0) + frac * (binMag (b0 + 1) - binMag (b0));
+        };
+
+        for (int col = 0; col < numColumns; ++col)
+        {
+            const float t0 = (float) col / numColumns;
+            const float t1 = (float) (col + 1) / numColumns;
+            const double f0 = minHz * std::pow (maxHz / minHz, t0);
+            const double f1 = minHz * std::pow (maxHz / minHz, t1);
+
+            float mag;
+            if (f1 - f0 < binHz)
+            {
+                mag = magAt ((float) (0.5 * (f0 + f1) / binHz));
+            }
+            else
+            {
+                const int b0 = juce::jlimit (1, fftSize / 2 - 1, (int) (f0 / binHz));
+                const int b1 = juce::jlimit (1, fftSize / 2 - 1, (int) std::ceil (f1 / binHz));
+                float peak = 0.0f;
+                for (int b = b0; b <= b1; ++b)
+                {
+                    const float re = fftScratch[(size_t) (2 * b)];
+                    const float im = fftScratch[(size_t) (2 * b + 1)];
+                    peak = juce::jmax (peak, re * re + im * im);
+                }
+                mag = std::sqrt (peak);
+            }
+
+            raw[col] = juce::Decibels::gainToDecibels (mag * (2.0f / fftSize), -90.0f);
+        }
+
+        //  Light neighbour blur + fast-rise / slow-fall ballistics.
+        for (int col = 0; col < numColumns; ++col)
+        {
+            const float left  = raw[juce::jmax (0, col - 1)];
+            const float right = raw[juce::jmin (numColumns - 1, col + 1)];
+            const float db = 0.25f * left + 0.5f * raw[col] + 0.25f * right;
+
+            auto& smoothed = columnDb[(size_t) col];
+            if (db > smoothed)
+                smoothed += 0.6f * (db - smoothed);            // fast rise
+            else
+                smoothed = juce::jmax (db, smoothed - 2.2f);   // slow fall (dB/frame)
+        }
+    }
+
+    void CrossoverDisplay::timerCallback()
+    {
+        updateSpectrum();
         repaint();
     }
 
     juce::Rectangle<float> CrossoverDisplay::plotArea() const
     {
-        return getLocalBounds().toFloat().reduced (10.0f, 8.0f).withTrimmedBottom (16.0f);
+        return getLocalBounds().toFloat()
+            .withTrimmedTop (tagHeight)
+            .withTrimmedLeft (axisWidth)
+            .withTrimmedRight (10.0f)
+            .withTrimmedBottom (bottomAxis);
     }
-
-    float CrossoverDisplay::currentCut (int i) const { return cutValues[i]; }
 
     float CrossoverDisplay::xForFrequency (float hz) const
     {
@@ -97,134 +159,148 @@ namespace fourcolor::ui
         return minHz * std::pow (maxHz / minHz, t);
     }
 
+    void CrossoverDisplay::setSelectedBand (int band)
+    {
+        selectedBand = juce::jlimit (0, numBands - 1, band);
+        repaint();
+    }
+
     void CrossoverDisplay::paint (juce::Graphics& g)
     {
         const auto area = plotArea();
 
-        g.setColour (colour::panel);
-        g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (2.0f), 6.0f);
+        g.setColour (juce::Colour (0xff0a0b0d));
+        g.fillRoundedRectangle (getLocalBounds().toFloat(), 4.0f);
 
-        //  Frequency grid.
+        //  dB scale + horizontal grid.
         g.setFont (uiFont (10.0f));
-        for (float f : { 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f })
+        for (int db : { 12, 6, 0, -6, -12 })
+        {
+            const float ty = juce::jmap ((float) db, 14.0f, -14.0f, area.getY(), area.getBottom());
+            g.setColour (colour::panelLine.withAlpha (db == 0 ? 0.8f : 0.35f));
+            g.drawHorizontalLine ((int) ty, area.getX(), area.getRight());
+            g.setColour (colour::textDim);
+            g.drawText ((db > 0 ? "+" : "") + juce::String (db), 2, (int) ty - 6,
+                        (int) axisWidth - 6, 12, juce::Justification::centredRight);
+        }
+
+        //  Frequency grid + labels.
+        for (float f : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f,
+                         2000.0f, 5000.0f, 10000.0f, 20000.0f })
         {
             const float x = xForFrequency (f);
-            g.setColour (colour::panelLine.withAlpha (0.6f));
+            g.setColour (colour::panelLine.withAlpha (0.30f));
             g.drawVerticalLine ((int) x, area.getY(), area.getBottom());
             g.setColour (colour::textDim);
             g.drawText (f >= 1000.0f ? juce::String (f / 1000.0f, 0) + "k" : juce::String ((int) f),
-                        (int) x - 16, (int) area.getBottom() + 2, 32, 12,
+                        (int) x - 16, (int) area.getBottom() + 4, 32, 12,
                         juce::Justification::centred);
         }
 
-        const double f1 = currentCut (0), f2 = currentCut (1), f3 = currentCut (2);
-
-        //  Band regions + REAL band magnitude curves (level-scaled).
-        const float edges[5] = { minHz, (float) f1, (float) f2, (float) f3, maxHz };
-
+        //  Band region tints (selected band glows a little).
+        const float edges[5] = { minHz, cutValues[0], cutValues[1], cutValues[2], maxHz };
         for (int b = 0; b < numBands; ++b)
         {
-            const bool isSelected = b == selectedBand;
             const float x0 = xForFrequency (edges[b]);
             const float x1 = xForFrequency (edges[b + 1]);
-
-            //  Region tint.
-            g.setColour (colour::band[b].withAlpha (isSelected ? 0.16f : 0.06f));
+            g.setColour (colour::band[b].withAlpha (b == selectedBand ? 0.10f : 0.03f));
             g.fillRect (juce::Rectangle<float> (x0, area.getY(), x1 - x0, area.getHeight()));
-
-            //  Analytic band curve.
-            const bool muted = state.getRawParameterValue (param::band (b, param::mute))->load() > 0.5f;
-            const float levelDb = state.getRawParameterValue (param::band (b, param::level))->load();
-            const double levelGain = juce::Decibels::decibelsToGain (levelDb);
-
-            juce::Path curve;
-            bool started = false;
-            for (float px = area.getX(); px <= area.getRight(); px += 2.0f)
-            {
-                const double f = frequencyForX (px);
-                double mag = 1.0;
-                switch (b)
-                {
-                    case 0: mag = lr4Low (f, f2) * lr4Low (f, f1); break;
-                    case 1: mag = lr4Low (f, f2) * lr4High (f, f1); break;
-                    case 2: mag = lr4High (f, f2) * lr4Low (f, f3); break;
-                    case 3: mag = lr4High (f, f2) * lr4High (f, f3); break;
-                }
-                mag *= levelGain;
-
-                //  Map -36..+12 dB onto the plot height.
-                const double db = juce::Decibels::gainToDecibels (mag, -60.0);
-                const float ty = (float) juce::jmap (juce::jlimit (-36.0, 12.0, db),
-                                                     -36.0, 12.0,
-                                                     (double) area.getBottom(), (double) area.getY());
-                if (! started) { curve.startNewSubPath (px, ty); started = true; }
-                else             curve.lineTo (px, ty);
-            }
-
-            g.setColour (colour::band[b].withAlpha (muted ? 0.25f : (isSelected ? 1.0f : 0.55f)));
-            g.strokePath (curve, juce::PathStrokeType (isSelected ? 2.0f : 1.3f));
-
-            //  Compact info: name, colour, drive, level.
-            const auto colorIdx = (int) state.getRawParameterValue (param::band (b, param::color))->load();
-            const auto driveVal = state.getRawParameterValue (param::band (b, param::drive))->load();
-
-            const juce::String info = juce::String (bandName (b)) + "  ·  "
-                                    + colorName ((ColorType) colorIdx) + "  "
-                                    + juce::String ((int) driveVal) + "%  "
-                                    + juce::String (levelDb, 1) + "dB";
-
-            g.setFont (uiFont (10.5f, isSelected));
-            g.setColour (isSelected ? colour::text : colour::textDim);
-            g.drawText (info, (int) x0 + 4, (int) area.getY() + 3,
-                        (int) (x1 - x0) - 8, 14, juce::Justification::centredLeft);
         }
 
-        //  Crossover handles.
-        for (int i = 0; i < 3; ++i)
+        //  The real output spectrum, mirrored around the centre line and
+        //  tinted per band region.
+        const float mid = area.getCentreY();
+        const float halfH = area.getHeight() * 0.5f - 2.0f;
+
+        juce::Path top;
+        top.preallocateSpace (numColumns * 3 + 8);
+        bool started = false;
+        for (int col = 0; col < numColumns; ++col)
         {
-            const float x = xForFrequency (currentCut (i));
-            const bool active = i == draggingHandle || i == hoverHandle;
+            const float px = area.getX() + area.getWidth() * ((float) col + 0.5f) / numColumns;
+            //  -66 dB..+12 dB onto 0..halfH.
+            const float h = juce::jlimit (0.0f, halfH,
+                juce::jmap (columnDb[(size_t) col], -66.0f, 12.0f, 0.0f, halfH));
 
-            g.setColour (colour::text.withAlpha (active ? 0.9f : 0.4f));
-            g.drawLine (x, area.getY(), x, area.getBottom(), active ? 2.0f : 1.2f);
-            g.fillEllipse (x - 4.0f, area.getCentreY() - 4.0f, 8.0f, 8.0f);
-
-            if (active)
-            {
-                const float hz = currentCut (i);
-                g.setFont (uiFont (10.5f, true));
-                g.drawText (hz >= 1000.0f ? juce::String (hz / 1000.0f, 2) + " kHz"
-                                          : juce::String ((int) hz) + " Hz",
-                            (int) x - 34, (int) area.getCentreY() + 8, 68, 14,
-                            juce::Justification::centred);
-            }
+            if (! started) { top.startNewSubPath (px, mid - h); started = true; }
+            else             top.lineTo (px, mid - h);
         }
-    }
-
-    void CrossoverDisplay::resized()
-    {
-        //  S/M/B rows anchored to the bottom of each band region; positions
-        //  depend on the cut frequencies, so re-place on every paint tick too.
-        const auto area = plotArea();
-        const float edges[5] = { minHz, currentCut (0), currentCut (1), currentCut (2), maxHz };
 
         for (int b = 0; b < numBands; ++b)
         {
-            const float x0 = xForFrequency (edges[b]);
-            auto& bb = bandButtons[b];
-            const int y = (int) area.getBottom() - 20;
-            const int bx = (int) x0 + 4;
-            bb.solo.setBounds (bx, y, 18, 16);
-            bb.mute.setBounds (bx + 20, y, 18, 16);
-            bb.bypass.setBounds (bx + 40, y, 18, 16);
+            const float x0 = juce::jmax (area.getX(), xForFrequency (edges[b]));
+            const float x1 = juce::jmin (area.getRight(), xForFrequency (edges[b + 1]));
+
+            juce::Graphics::ScopedSaveState save (g);
+            g.reduceClipRegion (juce::Rectangle<int> ((int) x0, (int) area.getY(),
+                                                      (int) (x1 - x0) + 1, (int) area.getHeight()));
+
+            //  Mirrored fill.
+            juce::Path fill (top);
+            fill.lineTo (area.getRight(), mid);
+            fill.lineTo (area.getX(), mid);
+            fill.closeSubPath();
+
+            const auto c = colour::band[b];
+            g.setColour (c.withAlpha (b == selectedBand ? 0.30f : 0.18f));
+            g.fillPath (fill);
+            g.fillPath (fill, juce::AffineTransform::verticalFlip (mid * 2.0f));
+
+            g.setColour (c.withAlpha (b == selectedBand ? 0.95f : 0.65f));
+            g.strokePath (top, juce::PathStrokeType (1.2f));
+            g.strokePath (top, juce::PathStrokeType (1.2f),
+                          juce::AffineTransform::verticalFlip (mid * 2.0f));
+        }
+
+        //  Centre line.
+        g.setColour (colour::textDim.withAlpha (0.5f));
+        g.drawHorizontalLine ((int) mid, area.getX(), area.getRight());
+
+        //  Crossover lines, pill handles, and the tag boxes above.
+        for (int i = 0; i < 3; ++i)
+        {
+            const float x = xForFrequency (cutValues[i]);
+            const bool active = i == draggingHandle || i == hoverHandle;
+            const auto lineColour = colour::band[i + 1];   // right-side band's colour
+
+            g.setColour (lineColour.withAlpha (active ? 0.95f : 0.6f));
+            g.drawLine (x, area.getY(), x, area.getBottom(), active ? 1.8f : 1.2f);
+
+            //  Pill handle with two dots.
+            const auto pill = juce::Rectangle<float> (x - 6.5f, area.getY() + 6.0f, 13.0f, 22.0f);
+            g.setColour (colour::panelHi);
+            g.fillRoundedRectangle (pill, 6.5f);
+            g.setColour (lineColour.withAlpha (active ? 1.0f : 0.7f));
+            g.drawRoundedRectangle (pill, 6.5f, 1.2f);
+            g.setColour (colour::text.withAlpha (0.85f));
+            g.fillEllipse (x - 1.5f, pill.getY() + 6.0f, 3.0f, 3.0f);
+            g.fillEllipse (x - 1.5f, pill.getY() + 13.0f, 3.0f, 3.0f);
+
+            //  Frequency tag above the plot.
+            const auto tagText = hzText (cutValues[i]);
+            g.setFont (uiFont (11.5f));
+            const float tw = juce::jmax (58.0f, (float) juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), tagText) + 16.0f);
+            auto tag = juce::Rectangle<float> (x - tw * 0.5f, 2.0f, tw, tagHeight - 6.0f);
+            tag.setX (juce::jlimit (area.getX(), area.getRight() - tw, tag.getX()));
+
+            g.setColour (active ? colour::panelHi.brighter (0.1f) : colour::panelHi);
+            g.fillRoundedRectangle (tag, 4.0f);
+            g.setColour (active ? lineColour : colour::panelLine);
+            g.drawRoundedRectangle (tag, 4.0f, 1.0f);
+            g.setColour (colour::text);
+            g.drawText (tagText, tag, juce::Justification::centred);
         }
     }
 
     int CrossoverDisplay::handleAt (juce::Point<float> pos) const
     {
         for (int i = 0; i < 3; ++i)
-            if (std::abs (pos.x - xForFrequency (currentCut (i))) < 7.0f)
+        {
+            const float x = xForFrequency (cutValues[i]);
+            //  The line, the pill, or the tag box above all grab the handle.
+            if (std::abs (pos.x - x) < 8.0f || (pos.y < tagHeight && std::abs (pos.x - x) < 34.0f))
                 return i;
+        }
         return -1;
     }
 
@@ -250,12 +326,11 @@ namespace fourcolor::ui
             return;
         }
 
-        //  Click on a region selects the band.
         const float f = frequencyForX (e.position.x);
         int band = 0;
-        if (f >= currentCut (2)) band = 3;
-        else if (f >= currentCut (1)) band = 2;
-        else if (f >= currentCut (0)) band = 1;
+        if (f >= cutValues[2]) band = 3;
+        else if (f >= cutValues[1]) band = 2;
+        else if (f >= cutValues[0]) band = 1;
 
         setSelectedBand (band);
         if (onBandSelected)
@@ -264,11 +339,8 @@ namespace fourcolor::ui
 
     void CrossoverDisplay::mouseDrag (const juce::MouseEvent& e)
     {
-        if (draggingHandle < 0)
-            return;
-
-        cutAttachments[draggingHandle]->setValueAsPartOfGesture (frequencyForX (e.position.x));
-        resized();   // S/M/B rows track the moving edges
+        if (draggingHandle >= 0)
+            cutAttachments[draggingHandle]->setValueAsPartOfGesture (frequencyForX (e.position.x));
     }
 
     void CrossoverDisplay::mouseUp (const juce::MouseEvent&)

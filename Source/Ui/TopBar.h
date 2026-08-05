@@ -1,7 +1,6 @@
-// Top strip: product name, preset selector (factory programs), A/B compare,
-// Quality and global Bypass. Undo/Redo is deliberately absent at 70%: the
-// APVTS is not wired through an UndoManager yet, and a dead button is worse
-// than no button.
+// Top strip, mockup layout: spaced wordmark | ◀ preset name* ▶ | A / B | undo
+// | QUALITY combo | power (bypass). The asterisk marks a modified preset; the
+// preset name opens a category menu.
 
 #pragma once
 
@@ -17,26 +16,35 @@ namespace fourcolor
 
 namespace fourcolor::ui
 {
-    class TopBar : public juce::Component
+    class TopBar : public juce::Component, private juce::Timer
     {
     public:
         TopBar (FourColorProcessor& processor);
+        ~TopBar() override;
 
-        void refreshPresetList();
         void paint (juce::Graphics&) override;
         void resized() override;
 
     private:
+        class PowerButton;
+        class IconButton;
+
+        void timerCallback() override;
+        void showPresetMenu();
+
         FourColorProcessor& proc;
 
-        juce::ComboBox presetBox;
-        juce::TextButton abButton { "A" };
-        juce::TextButton copyButton { "COPY" };
+        std::unique_ptr<juce::ArrowButton> prevButton, nextButton;
+        juce::TextButton presetNameButton;
+        juce::TextButton aButton { "A" }, bButton { "B" };
+        std::unique_ptr<IconButton> undoButton;
         juce::ComboBox qualityBox;
-        juce::TextButton bypassButton { "BYPASS" };
+        std::unique_ptr<PowerButton> powerButton;
 
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAttachment;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
+
+        juce::Rectangle<int> qualityLabelArea;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TopBar)
     };

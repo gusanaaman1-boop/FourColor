@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "PluginProcessor.h"
+#include "Ui/BandCards.h"
 #include "Ui/BandStrip.h"
 #include "Ui/CrossoverDisplay.h"
 #include "Ui/GlobalBar.h"
@@ -11,10 +12,9 @@
 
 namespace fourcolor
 {
-    //  Layout: TopBar / CrossoverDisplay (flexible) / BandStrip / GlobalBar.
-    //  Only the selected band's controls are ever shown - the display is the
-    //  navigation.
-    class FourColorEditor : public juce::AudioProcessorEditor
+    //  Layout (mockup): TopBar / spectrum display / band cards / selected-band
+    //  panel / global bar.
+    class FourColorEditor : public juce::AudioProcessorEditor, private juce::Timer
     {
     public:
         explicit FourColorEditor (FourColorProcessor&);
@@ -24,11 +24,14 @@ namespace fourcolor
         void resized() override;
 
     private:
+        void timerCallback() override;
+
         FourColorProcessor& processor;
 
         ui::Laf laf;
         ui::TopBar topBar { processor };
-        ui::CrossoverDisplay display { processor.apvts };
+        ui::CrossoverDisplay display { processor };
+        ui::BandCards bandCards { processor };
         ui::BandStrip bandStrip { processor.apvts };
         ui::GlobalBar globalBar { processor };
         juce::TooltipWindow tooltips { this, 600 };

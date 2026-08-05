@@ -8,7 +8,8 @@
 
 namespace fourcolor
 {
-    class FourColorProcessor : public juce::AudioProcessor
+    class FourColorProcessor : public juce::AudioProcessor,
+                               private juce::AudioProcessorValueTreeState::Listener
     {
     public:
         FourColorProcessor();
@@ -55,6 +56,17 @@ namespace fourcolor
         void copyABToOther();
         int getABIndex() const noexcept { return abIndex; }
 
+        //  Preset navigation + modified marker for the UI.
+        void stepProgram (int delta);
+        bool isPresetDirty() const noexcept { return presetDirty.load(); }
+
+        //  Undo of parameter edits (the editor groups transactions on idle).
+        juce::UndoManager undoManager;
+
+        //  --- output spectrum tap (lock-free, mono sum) ---------------------------
+        //  The editor drains this to run its FFT; nothing is faked in the display.
+        int readSpectrumSamples (float* dest, int maxCount) noexcept;
+
         static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     private:
@@ -96,7 +108,15 @@ namespace fourcolor
         FourColorEngine engine;
         int currentProgram = 0;
 
+        void parameterChanged (const juce::String&, float) override { presetDirty.store (true); }
+        void pushSpectrumSamples (const juce::AudioBuffer<float>& buffer) noexcept;
+
         std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
+        std::atomic<bool> presetDirty { false };
+
+        static constexpr int spectrumFifoSize = 8192;
+        juce::AbstractFifo spectrumFifo { spectrumFifoSize };
+        std::vector<float> spectrumData = std::vector<float> (spectrumFifoSize, 0.0f);
 
         juce::MemoryBlock abSlots[2];
         int abIndex = 0;

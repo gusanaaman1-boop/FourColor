@@ -1,6 +1,7 @@
-// The selected band's controls - the only band whose full control set is ever
-// on screen. Colour selector, big Drive, Behavior, Tone, Space, Band Mix and
-// Band Level; everything rebinds when the selection changes.
+// The selected band's panel, mockup layout: a vertical COLOR radio list on the
+// left, then DRIVE (big knob), BEHAVIOR (BODY <-> ATTACK gradient slider),
+// TONE (DARK/BRIGHT), SPACE/SPREAD, and a compact band MIX. Everything rebinds
+// when the selection changes; the panel border takes the band's colour.
 
 #pragma once
 
@@ -28,11 +29,16 @@ namespace fourcolor::ui
         juce::AudioProcessorValueTreeState& state;
         int band = 0;
 
-        juce::Label header;
         juce::TextButton colorButtons[4];
         std::unique_ptr<juce::ParameterAttachment> colorAttachment;
+        int activeColor = 0;
 
-        std::unique_ptr<Knob> drive, behavior, tone, space, bandMix, level;
+        std::unique_ptr<Knob> drive, tone, space, bandMix;
+
+        juce::Slider behaviorSlider;
+        std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> behaviorAttachment;
+
+        juce::Rectangle<int> colorArea, behaviorArea;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BandStrip)
     };

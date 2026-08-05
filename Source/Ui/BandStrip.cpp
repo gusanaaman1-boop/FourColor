@@ -5,23 +5,22 @@ namespace fourcolor::ui
     BandStrip::BandStrip (juce::AudioProcessorValueTreeState& apvts)
         : state (apvts)
     {
-        header.setFont (uiFont (13.0f, true));
-        header.setJustificationType (juce::Justification::centredLeft);
-        addAndMakeVisible (header);
-
+        //  The COLOR rows are painted by this component (radio dot + name);
+        //  the buttons are transparent hit targets on top of the rows.
         const char* names[] = { "WARM", "IRON", "BITE", "FUZZ" };
         for (int i = 0; i < 4; ++i)
         {
-            auto& b = colorButtons[i];
-            b.setButtonText (names[i]);
-            b.setClickingTogglesState (false);
-            b.setTooltip (juce::String ("Colour engine: ") + names[i]);
-            b.onClick = [this, i]
+            auto& btn = colorButtons[i];
+            btn.setButtonText (names[i]);
+            btn.setClickingTogglesState (false);
+            btn.setTooltip (juce::String ("Colour engine: ") + names[i]);
+            btn.onClick = [this, i]
             {
                 if (auto* p = state.getParameter (param::band (band, param::color)))
                     p->setValueNotifyingHost (p->convertTo0to1 ((float) i));
             };
-            addAndMakeVisible (b);
+            btn.setAlpha (0.0f);          // invisible hit target; row drawn in paint()
+            addAndMakeVisible (btn);
         }
 
         auto makeKnob = [&] (const char* suffix, const char* title, const char* tip)
@@ -30,16 +29,18 @@ namespace fourcolor::ui
                                            colour::band[0], tip);
         };
 
-        drive    = makeKnob (param::drive, "DRIVE", "How hard this band is pushed into its colour");
-        behavior = makeKnob (param::behavior, "BEHAVIOR", "BODY: saturate the sustain. ATTACK: saturate the hit.");
-        tone     = makeKnob (param::tone, "TONE", "Dark <-> bright, shaped around the band centre");
-        space    = makeKnob (param::space, "SPACE", "Diffuses only what the saturation created");
-        bandMix  = makeKnob (param::bandMix, "MIX", "This band: processed vs clean (aligned)");
-        level    = makeKnob (param::level, "LEVEL", "Band output level");
+        drive   = makeKnob (param::drive, "DRIVE", "How hard this band is pushed into its colour");
+        tone    = makeKnob (param::tone, "TONE", "Dark <-> bright, shaped around the band centre");
+        space   = makeKnob (param::space, "SPACE / SPREAD", "Diffuses only what the saturation created");
+        bandMix = makeKnob (param::bandMix, "MIX", "This band: processed vs clean (aligned)");
 
-        for (auto* k : { drive.get(), behavior.get(), tone.get(), space.get(),
-                         bandMix.get(), level.get() })
+        for (auto* k : { drive.get(), tone.get(), space.get(), bandMix.get() })
             addAndMakeVisible (*k);
+
+        behaviorSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        behaviorSlider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 70, 16);
+        behaviorSlider.setTooltip ("BODY: saturate the sustain. ATTACK: saturate the hit.");
+        addAndMakeVisible (behaviorSlider);
 
         setBand (0);
     }
@@ -53,13 +54,8 @@ namespace fourcolor::ui
             *p,
             [this] (float newValue)
             {
-                const int active = juce::roundToInt (newValue);
-                for (int i = 0; i < 4; ++i)
-                {
-                    colorButtons[i].setToggleState (i == active, juce::dontSendNotification);
-                    colorButtons[i].setColour (juce::TextButton::buttonOnColourId,
-                                               colour::band[band].withAlpha (0.85f));
-                }
+                activeColor = juce::roundToInt (newValue);
+                repaint();
             },
             nullptr);
         colorAttachment->sendInitialUpdate();
@@ -68,20 +64,20 @@ namespace fourcolor::ui
     void BandStrip::setBand (int bandIndex)
     {
         band = juce::jlimit (0, numBands - 1, bandIndex);
+        const auto accent = colour::band[band];
 
-        header.setText (juce::String (bandName (band)) + "  BAND", juce::dontSendNotification);
-        header.setColour (juce::Label::textColourId, colour::band[band]);
+        drive  ->rebind (param::band (band, param::drive));
+        tone   ->rebind (param::band (band, param::tone));
+        space  ->rebind (param::band (band, param::space));
+        bandMix->rebind (param::band (band, param::bandMix));
 
-        drive   ->rebind (param::band (band, param::drive));
-        behavior->rebind (param::band (band, param::behavior));
-        tone    ->rebind (param::band (band, param::tone));
-        space   ->rebind (param::band (band, param::space));
-        bandMix ->rebind (param::band (band, param::bandMix));
-        level   ->rebind (param::band (band, param::level));
+        for (auto* k : { drive.get(), tone.get(), space.get(), bandMix.get() })
+            k->getSlider().setColour (juce::Slider::rotarySliderFillColourId, accent);
 
-        for (auto* k : { drive.get(), behavior.get(), tone.get(), space.get(),
-                         bandMix.get(), level.get() })
-            k->getSlider().setColour (juce::Slider::rotarySliderFillColourId, colour::band[band]);
+        behaviorAttachment.reset();
+        behaviorAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+            state, param::band (band, param::behavior), behaviorSlider);
+        behaviorSlider.setColour (juce::Slider::rotarySliderFillColourId, accent);
 
         rebindColorButtons();
         repaint();
@@ -89,34 +85,90 @@ namespace fourcolor::ui
 
     void BandStrip::paint (juce::Graphics& g)
     {
-        g.setColour (colour::panel);
-        g.fillRoundedRectangle (getLocalBounds().toFloat().reduced (2.0f), 6.0f);
-        g.setColour (colour::band[band].withAlpha (0.5f));
-        g.fillRect (2.0f, 4.0f, 3.0f, (float) getHeight() - 8.0f);
+        const auto accent = colour::band[band];
+
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour (colour::panel.interpolatedWith (accent, 0.03f));
+        g.fillRoundedRectangle (bounds, 6.0f);
+        g.setColour (accent.withAlpha (0.55f));
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 6.0f, 1.2f);
+
+        //  Section headers.
+        g.setFont (labelFont (12.0f, false));
+        g.setColour (colour::textDim);
+        g.drawText ("COLOR", colorArea.withHeight (16), juce::Justification::centred);
+        g.drawText ("BEHAVIOR", behaviorArea.withHeight (16), juce::Justification::centred);
+
+        //  COLOR radio rows (buttons are invisible hit targets on top).
+        const char* names[] = { "WARM", "IRON", "BITE", "FUZZ" };
+        for (int i = 0; i < 4; ++i)
+        {
+            const auto r = colorButtons[i].getBounds().toFloat();
+            const bool on = i == activeColor;
+
+            if (on)
+            {
+                g.setColour (accent.withAlpha (0.85f));
+                g.fillRoundedRectangle (r, 4.0f);
+            }
+
+            g.setColour (on ? juce::Colours::black.withAlpha (0.55f) : colour::panelLine.brighter (0.15f));
+            g.drawEllipse (r.getX() + 8.0f, r.getCentreY() - 3.5f, 7.0f, 7.0f, 1.2f);
+            if (on)
+            {
+                g.setColour (juce::Colours::black.withAlpha (0.8f));
+                g.fillEllipse (r.getX() + 10.0f, r.getCentreY() - 1.5f, 3.0f, 3.0f);
+            }
+
+            g.setFont (labelFont (12.0f, on));
+            g.setColour (on ? juce::Colour (0xff141519) : colour::textDim);
+            g.drawText (names[i], r.toNearestInt().withTrimmedLeft (24),
+                        juce::Justification::centredLeft);
+        }
+
+        //  BODY / 0 / ATTACK captions under the slider.
+        const auto sliderBounds = behaviorSlider.getBounds();
+        g.setFont (labelFont (11.0f));
+        g.setColour (colour::textDim);
+        g.drawText ("BODY", sliderBounds.getX() - 2, sliderBounds.getBottom() - 16, 60, 14,
+                    juce::Justification::centredLeft);
+        g.drawText ("ATTACK", sliderBounds.getRight() - 62, sliderBounds.getBottom() - 16, 60, 14,
+                    juce::Justification::centredRight);
+
+        //  DARK / BRIGHT captions for TONE.
+        const auto toneBounds = tone->getBounds();
+        g.setFont (labelFont (10.5f));
+        g.drawText ("DARK", toneBounds.getX() - 12, toneBounds.getBottom() - 26, 44, 13,
+                    juce::Justification::centredLeft);
+        g.drawText ("BRIGHT", toneBounds.getRight() - 34, toneBounds.getBottom() - 26, 50, 13,
+                    juce::Justification::centredLeft);
     }
 
     void BandStrip::resized()
     {
-        auto area = getLocalBounds().reduced (12, 6);
+        auto area = getLocalBounds().reduced (16, 10);
 
-        auto left = area.removeFromLeft (150);
-        header.setBounds (left.removeFromTop (20));
-        left.removeFromTop (4);
+        colorArea = area.removeFromLeft (150);
+        auto list = colorArea.withTrimmedTop (18);
         for (int i = 0; i < 4; ++i)
         {
-            colorButtons[i].setBounds (left.removeFromTop (24).reduced (0, 1));
-            left.removeFromTop (2);
+            colorButtons[i].setBounds (list.removeFromTop (26).reduced (0, 1));
+            list.removeFromTop (2);
         }
 
-        area.removeFromLeft (10);
+        area.removeFromLeft (14);
 
-        //  DRIVE gets ~1.6x the width of the others.
         const int unit = area.getWidth() / 13;
-        drive   ->setBounds (area.removeFromLeft (unit * 3));
-        behavior->setBounds (area.removeFromLeft (unit * 2));
-        tone    ->setBounds (area.removeFromLeft (unit * 2));
-        space   ->setBounds (area.removeFromLeft (unit * 2));
-        bandMix ->setBounds (area.removeFromLeft (unit * 2));
-        level   ->setBounds (area);
+        drive->setBounds (area.removeFromLeft (unit * 2));
+        area.removeFromLeft (unit / 2);
+
+        behaviorArea = area.removeFromLeft (unit * 4);
+        behaviorSlider.setBounds (behaviorArea.withTrimmedTop (22).withTrimmedBottom (16)
+                                              .reduced (10, 0));
+
+        area.removeFromLeft (unit / 2);
+        tone->setBounds (area.removeFromLeft (unit * 2));
+        space->setBounds (area.removeFromLeft (unit * 2));
+        bandMix->setBounds (area);
     }
 }

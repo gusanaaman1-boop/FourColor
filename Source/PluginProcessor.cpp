@@ -104,10 +104,15 @@ namespace fourcolor
         : AudioProcessor (BusesProperties()
                               .withInput ("Input", juce::AudioChannelSet::stereo(), true)
                               .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-          apvts (*this, nullptr, "FOURCOLOR", createParameterLayout())
+          apvts (*this, &undoManager, "FOURCOLOR", createParameterLayout())
     {
         apvts.state.setProperty ("selectedBand", 0, nullptr);
         cacheParameterPointers();
+
+        //  Any parameter edit marks the current preset as modified in the UI.
+        for (auto* p : getParameters())
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p))
+                apvts.addParameterListener (ranged->getParameterID(), this);
     }
 
     void FourColorProcessor::cacheParameterPointers()
@@ -220,6 +225,8 @@ namespace fourcolor
         pushParametersToEngine();
         engine.process (buffer);
 
+        pushSpectrumSamples (buffer);
+
         peak = 0.0f;
         for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
             peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
@@ -231,6 +238,52 @@ namespace fourcolor
         const int latency = engine.getLatencySamples();
         if (latency != getLatencySamples())
             setLatencySamples (latency);
+    }
+
+    // --- output spectrum tap --------------------------------------------------------
+    void FourColorProcessor::pushSpectrumSamples (const juce::AudioBuffer<float>& buffer) noexcept
+    {
+        const int n = buffer.getNumSamples();
+        const int chans = juce::jmin (2, buffer.getNumChannels());
+
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        spectrumFifo.prepareToWrite (n, start1, size1, start2, size2);
+
+        auto writeRange = [&] (int start, int size, int offset)
+        {
+            for (int i = 0; i < size; ++i)
+            {
+                float v = buffer.getSample (0, offset + i);
+                if (chans > 1)
+                    v = 0.5f * (v + buffer.getSample (1, offset + i));
+                spectrumData[(size_t) (start + i)] = v;
+            }
+        };
+
+        writeRange (start1, size1, 0);
+        writeRange (start2, size2, size1);
+        spectrumFifo.finishedWrite (size1 + size2);
+    }
+
+    int FourColorProcessor::readSpectrumSamples (float* dest, int maxCount) noexcept
+    {
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        spectrumFifo.prepareToRead (maxCount, start1, size1, start2, size2);
+
+        for (int i = 0; i < size1; ++i)
+            dest[i] = spectrumData[(size_t) (start1 + i)];
+        for (int i = 0; i < size2; ++i)
+            dest[size1 + i] = spectrumData[(size_t) (start2 + i)];
+
+        spectrumFifo.finishedRead (size1 + size2);
+        return size1 + size2;
+    }
+
+    // --- preset navigation ----------------------------------------------------------
+    void FourColorProcessor::stepProgram (int delta)
+    {
+        const int count = getNumPrograms();
+        setCurrentProgram (((getCurrentProgram() + delta) % count + count) % count);
     }
 
     // --- A/B compare (message thread) ---------------------------------------------
@@ -271,6 +324,7 @@ namespace fourcolor
 
         currentProgram = index;
         PresetLibrary::apply (index, apvts);
+        presetDirty.store (false);
     }
 
     const juce::String FourColorProcessor::getProgramName (int index)

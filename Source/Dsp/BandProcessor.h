@@ -51,6 +51,10 @@ namespace fourcolor
 
         float getLatencySamples() const noexcept { return nonlinear.getLatencySamples(); }
 
+        //  Block peak of this band's OUTPUT (post mix/level/mute), for the UI
+        //  band meters. Lock-free; the reader exchanges it back to zero.
+        float readAndResetOutputPeak() noexcept { return outputPeak.exchange (0.0f); }
+
         //  The wet path this block, before mix/level - used by HarmonicSpace.
         NonlinearStage& getNonlinearStage() noexcept { return nonlinear; }
 
@@ -82,6 +86,7 @@ namespace fourcolor
         juce::SmoothedValue<float> driveSmoothed { 25.0f };
 
         Settings settings;
+        std::atomic<float> outputPeak { 0.0f };
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BandProcessor)
     };

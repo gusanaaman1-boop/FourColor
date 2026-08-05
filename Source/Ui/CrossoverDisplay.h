@@ -1,57 +1,67 @@
-// The central view: four coloured band regions on a log frequency axis, the
-// REAL LR4 magnitude curves of the current crossover (computed analytically
-// from the same cutoffs the DSP uses - nothing is faked), three draggable
-// crossover handles, band selection by click, and compact per-band info with
-// S/M/B directly on each region.
-//
-// An FFT analyzer is deliberately absent at the 70% stage: the display shows
-// the crossover's true response, not a fake spectrum.
+// The central view, matched to the mockup: a REAL output spectrum (FFT of the
+// processed signal, drained from the processor's lock-free tap) drawn mirrored
+// around the centre line, tinted per band region; frequency tag boxes above
+// three draggable crossover handles; a dB scale on the left. Nothing here is
+// animated from fake data - a silent plugin shows a flat line.
 
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_dsp/juce_dsp.h>
 
 #include "../Core/ParameterIds.h"
 #include "Theme.h"
+
+namespace fourcolor
+{
+    class FourColorProcessor;
+}
 
 namespace fourcolor::ui
 {
     class CrossoverDisplay : public juce::Component, private juce::Timer
     {
     public:
-        CrossoverDisplay (juce::AudioProcessorValueTreeState& apvts);
+        CrossoverDisplay (FourColorProcessor& processor);
         ~CrossoverDisplay() override;
 
         std::function<void (int band)> onBandSelected;
 
         void setSelectedBand (int band);
         void paint (juce::Graphics&) override;
-        void resized() override;
 
         void mouseDown (const juce::MouseEvent&) override;
         void mouseDrag (const juce::MouseEvent&) override;
         void mouseUp (const juce::MouseEvent&) override;
         void mouseMove (const juce::MouseEvent&) override;
 
+        float getCutHz (int i) const noexcept { return cutValues[i]; }
+
     private:
         void timerCallback() override;
+        void updateSpectrum();
+
         float xForFrequency (float hz) const;
         float frequencyForX (float x) const;
         int handleAt (juce::Point<float> pos) const;
         juce::Rectangle<float> plotArea() const;
-        float currentCut (int i) const;
 
+        FourColorProcessor& proc;
         juce::AudioProcessorValueTreeState& state;
+
         std::unique_ptr<juce::ParameterAttachment> cutAttachments[3];
         float cutValues[3] = { 120.0f, 700.0f, 4500.0f };
 
-        //  Small S/M/B buttons per band, attached straight to the parameters.
-        struct BandButtons
-        {
-            juce::TextButton solo { "S" }, mute { "M" }, bypass { "B" };
-            std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> aSolo, aMute, aBypass;
-        };
-        BandButtons bandButtons[numBands];
+        //  --- analyzer -----------------------------------------------------------
+        static constexpr int fftOrder = 11, fftSize = 1 << fftOrder;   // 2048
+        juce::dsp::FFT fft { fftOrder };
+        std::vector<float> sampleRing = std::vector<float> ((size_t) fftSize, 0.0f);
+        int ringPos = 0;
+        std::vector<float> fftScratch = std::vector<float> ((size_t) fftSize * 2, 0.0f);
+        std::vector<float> window = std::vector<float> ((size_t) fftSize, 0.0f);
+
+        static constexpr int numColumns = 256;
+        std::vector<float> columnDb = std::vector<float> ((size_t) numColumns, -90.0f);
 
         int selectedBand = 0;
         int draggingHandle = -1;
