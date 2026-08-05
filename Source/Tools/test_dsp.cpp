@@ -38,10 +38,25 @@ namespace
     std::atomic<bool> trackAllocations { false };
     std::atomic<int>  allocationCount { 0 };
 
+    //  The size of the first tracked allocation, and a caller-set tag saying
+    //  which block it happened in. An allocation that only appears in one
+    //  compiler's Release build cannot be chased with a debugger from another
+    //  machine; the size is usually enough to name the container.
+    std::atomic<size_t> firstAllocSize { 0 };
+    std::atomic<int>    allocPhase { -1 };
+    std::atomic<int>    firstAllocPhase { -1 };
+
     inline void* trackedAllocate (std::size_t size)
     {
         if (trackAllocations.load (std::memory_order_relaxed))
-            allocationCount.fetch_add (1, std::memory_order_relaxed);
+        {
+            if (allocationCount.fetch_add (1, std::memory_order_relaxed) == 0)
+            {
+                firstAllocSize.store (size, std::memory_order_relaxed);
+                firstAllocPhase.store (allocPhase.load (std::memory_order_relaxed),
+                                       std::memory_order_relaxed);
+            }
+        }
 
         return std::malloc (size == 0 ? 1 : size);
     }
@@ -122,6 +137,17 @@ namespace
         ++checksRun;
         std::printf ("  --  %s   [performance check skipped: Debug build]\n", what.toRawUTF8());
        #else
+        //  A CI runner is a shared two-core VM with software rendering. Its CPU
+        //  numbers say as little about the shipped plug-in as an unoptimised
+        //  build's do, and the thresholds must not be relaxed to fit it.
+        if (SystemStats::getEnvironmentVariable ("CI", {}).isNotEmpty())
+        {
+            ++checksRun;
+            std::printf ("  --  %s   [performance check skipped: CI runner]\n",
+                         what.toRawUTF8());
+            return;
+        }
+
         check (condition, what);
        #endif
     }
@@ -389,12 +415,21 @@ static void testNoAllocationInProcess()
     }
 
     allocationCount.store (0);
+    firstAllocSize.store (0);
+    firstAllocPhase.store (-1);
     trackAllocations.store (true);
 
     for (int i = 0; i < 50; ++i)
+    {
+        allocPhase.store (i);
         proc.processBlock (buffer, midi);
+    }
 
     trackAllocations.store (false);
+
+    if (allocationCount.load() != 0)
+        std::printf ("      first allocation: %d bytes, during block %d of 50\n",
+                     (int) firstAllocSize.load(), firstAllocPhase.load());
 
     check (allocationCount.load() == 0,
            "processBlock performs no allocations (counted "
