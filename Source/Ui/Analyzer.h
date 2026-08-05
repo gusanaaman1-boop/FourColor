@@ -53,6 +53,7 @@ namespace fourcolor::ui
         void setResidualProvider (ResidualProvider provider) { residualProvider = std::move (provider); }
 
         void paint (juce::Graphics&) override;
+        void resized() override;
 
         void mouseDown (const juce::MouseEvent&) override;
         void mouseDrag (const juce::MouseEvent&) override;
@@ -64,6 +65,13 @@ namespace fourcolor::ui
     private:
         void timerCallback() override;
         void updateSpectrum();
+
+        //  The container, the grid and the axis labels do not change between
+        //  frames, but they were being rebuilt 36 times a second - two dozen
+        //  drawText calls and their glyph layout every frame. They are rendered
+        //  once into this image and blitted instead.
+        void rebuildBackdrop();
+        juce::Image backdrop;
 
         float xForFrequency (float hz) const;
         float frequencyForX (float x) const;

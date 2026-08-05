@@ -208,8 +208,25 @@ namespace fourcolor::ui
         return 0;
     }
 
-    void Analyzer::paint (juce::Graphics& g)
+    void Analyzer::resized()
     {
+        rebuildBackdrop();
+    }
+
+    void Analyzer::rebuildBackdrop()
+    {
+        if (getWidth() <= 0 || getHeight() <= 0)
+            return;
+
+        const auto scale = (float) juce::Desktop::getInstance().getGlobalScaleFactor();
+        backdrop = juce::Image (juce::Image::ARGB,
+                                juce::jmax (1, juce::roundToInt ((float) getWidth() * scale)),
+                                juce::jmax (1, juce::roundToInt ((float) getHeight() * scale)),
+                                true);
+
+        juce::Graphics g (backdrop);
+        g.addTransform (juce::AffineTransform::scale (scale));
+
         const auto area = plotArea();
         const auto full = getLocalBounds().toFloat();
 
@@ -249,6 +266,19 @@ namespace fourcolor::ui
                         (int) x - 18, (int) area.getBottom() + 4, 36, 12,
                         juce::Justification::centred);
         }
+    }
+
+    void Analyzer::paint (juce::Graphics& g)
+    {
+        const auto area = plotArea();
+        const auto full = getLocalBounds().toFloat();
+
+        if (backdrop.isNull())
+            rebuildBackdrop();
+
+        g.drawImage (backdrop, full, juce::RectanglePlacement::stretchToFit);
+
+
 
         //  --- LR4 responses, thin, behind everything -----------------------------
         {
@@ -295,69 +325,84 @@ namespace fourcolor::ui
         //  Each shape is built ONCE as a single path containing both the upper
         //  and the mirrored lower half - one fill and one stroke per band
         //  instead of two, which is what brings the repaint cost down.
-        juce::Path centreShape;   // closed, mirrored: the filled body
-        juce::Path centreOutline; // upper + lower contours, for stroking
+        //  Built PER BAND, over that band's columns only. Building one path
+        //  across the whole width and then drawing it four times under four
+        //  clip regions rasterises every column four times; restricting the
+        //  geometry does the same picture for a quarter of the work.
+        const float edgeHz[5] = { minHz, cutValues[0], cutValues[1], cutValues[2], maxHz };
+
+        auto columnForX = [&area] (float px)
         {
-            centreShape.startNewSubPath (area.getX(), mid - heightFor (midDb[0]));
-            centreOutline.startNewSubPath (area.getX(), mid - heightFor (midDb[0]));
-            for (int col = 1; col < numColumns; ++col)
+            const float t = juce::jlimit (0.0f, 1.0f,
+                                          (px - area.getX()) / juce::jmax (1.0f, area.getWidth()));
+            return juce::jlimit (0, numColumns - 1, (int) std::round (t * (numColumns - 1)));
+        };
+
+        struct BandPaths { juce::Path shape, outline, side[2]; };
+
+        auto buildBand = [&] (int first, int last)
+        {
+            BandPaths paths;
+
+            //  One column of overlap on each side, so neighbouring bands meet
+            //  without a seam.
+            first = juce::jmax (0, first - 1);
+            last  = juce::jmin (numColumns - 1, last + 1);
+
+            paths.shape.preallocateSpace ((last - first + 2) * 6);
+            paths.outline.preallocateSpace ((last - first + 2) * 6);
+
+            paths.shape.startNewSubPath (columnX (first), mid - heightFor (midDb[(size_t) first]));
+            paths.outline.startNewSubPath (columnX (first), mid - heightFor (midDb[(size_t) first]));
+            for (int col = first + 1; col <= last; ++col)
             {
                 const float py = mid - heightFor (midDb[(size_t) col]);
-                centreShape.lineTo (columnX (col), py);
-                centreOutline.lineTo (columnX (col), py);
+                paths.shape.lineTo (columnX (col), py);
+                paths.outline.lineTo (columnX (col), py);
             }
-            const float lastH = heightFor (midDb[(size_t) (numColumns - 1)]);
-            centreShape.lineTo (area.getRight(), mid - lastH);
-            centreOutline.lineTo (area.getRight(), mid - lastH);
 
-            centreShape.lineTo (area.getRight(), mid + lastH);
-            centreOutline.startNewSubPath (area.getRight(), mid + lastH);
-            for (int col = numColumns - 1; col >= 1; --col)
+            paths.shape.lineTo (columnX (last), mid + heightFor (midDb[(size_t) last]));
+            paths.outline.startNewSubPath (columnX (last), mid + heightFor (midDb[(size_t) last]));
+            for (int col = last - 1; col >= first; --col)
             {
                 const float py = mid + heightFor (midDb[(size_t) col]);
-                centreShape.lineTo (columnX (col), py);
-                centreOutline.lineTo (columnX (col), py);
+                paths.shape.lineTo (columnX (col), py);
+                paths.outline.lineTo (columnX (col), py);
             }
-            centreShape.lineTo (area.getX(), mid + heightFor (midDb[0]));
-            centreOutline.lineTo (area.getX(), mid + heightFor (midDb[0]));
-            centreShape.closeSubPath();
-        }
+            paths.shape.closeSubPath();
 
-        //  Side contours: outlines whose distance from the centre shape is the
-        //  MEASURED side energy. Below the low crossover the DSP keeps the
-        //  signal mono, so these close onto the centre on their own.
-        juce::Path sideOutline[2];
-        for (int k = 0; k < 2; ++k)
-        {
-            const float weight = 0.50f + 0.42f * (float) k;
-            auto heightAt = [&] (int col)
+            //  Side contours: distance from the centre is the MEASURED side
+            //  energy. Below the low crossover the DSP keeps the signal mono,
+            //  so these close onto the centre on their own.
+            for (int k = 0; k < 2; ++k)
             {
-                return heightFor (midDb[(size_t) col])
-                     + weight * heightFor (sideDb[(size_t) col]) * 0.55f;
-            };
+                const float weight = 0.50f + 0.42f * (float) k;
+                auto heightAt = [&] (int col)
+                {
+                    return heightFor (midDb[(size_t) col])
+                         + weight * heightFor (sideDb[(size_t) col]) * 0.55f;
+                };
 
-            sideOutline[k].startNewSubPath (area.getX(), mid - heightAt (0));
-            for (int col = 1; col < numColumns; ++col)
-                sideOutline[k].lineTo (columnX (col), mid - heightAt (col));
+                paths.side[k].startNewSubPath (columnX (first), mid - heightAt (first));
+                for (int col = first + 1; col <= last; ++col)
+                    paths.side[k].lineTo (columnX (col), mid - heightAt (col));
 
-            sideOutline[k].startNewSubPath (area.getX(), mid + heightAt (0));
-            for (int col = 1; col < numColumns; ++col)
-                sideOutline[k].lineTo (columnX (col), mid + heightAt (col));
-        }
+                paths.side[k].startNewSubPath (columnX (first), mid + heightAt (first));
+                for (int col = first + 1; col <= last; ++col)
+                    paths.side[k].lineTo (columnX (col), mid + heightAt (col));
+            }
 
-        const float edges[5] = { minHz, cutValues[0], cutValues[1], cutValues[2], maxHz };
+            return paths;
+        };
 
         for (int b = 0; b < numBands; ++b)
         {
-            const float x0 = juce::jmax (area.getX(), xForFrequency (edges[b]));
-            const float x1 = juce::jmin (area.getRight(), xForFrequency (edges[b + 1]));
+            const float x0 = juce::jmax (area.getX(), xForFrequency (edgeHz[b]));
+            const float x1 = juce::jmin (area.getRight(), xForFrequency (edgeHz[b + 1]));
             if (x1 <= x0)
                 continue;
 
-            juce::Graphics::ScopedSaveState save (g);
-            g.reduceClipRegion (juce::Rectangle<int> ((int) std::floor (x0), (int) area.getY(),
-                                                      (int) std::ceil (x1 - x0) + 1,
-                                                      (int) area.getHeight()));
+            const auto paths = buildBand (columnForX (x0), columnForX (x1));
 
             const auto c = tokens::band[b];
             const bool isSel = b == selectedBand;
@@ -375,18 +420,18 @@ namespace fourcolor::ui
                                        c.withAlpha (topAlpha), 0.0f, mid + halfH, false);
             grad.addColour (0.5, c.withAlpha (botAlpha));
             g.setGradientFill (grad);
-            g.fillPath (centreShape);
+            g.fillPath (paths.shape);
 
             //  Side contours.
             for (int k = 0; k < 2; ++k)
             {
                 g.setColour (c.withAlpha ((isSel ? 0.34f : 0.16f) * (1.0f - 0.20f * (float) k)));
-                g.strokePath (sideOutline[k], juce::PathStrokeType (1.0f));
+                g.strokePath (paths.side[k], juce::PathStrokeType (1.0f));
             }
 
             //  Main contour.
             g.setColour (c.withAlpha (isSel ? 0.98f : 0.70f));
-            g.strokePath (centreOutline, juce::PathStrokeType (isSel ? 1.4f : 1.1f));
+            g.strokePath (paths.outline, juce::PathStrokeType (isSel ? 1.4f : 1.1f));
 
             //  Optional residual layer - only if a real provider is installed.
             if (residualProvider != nullptr)

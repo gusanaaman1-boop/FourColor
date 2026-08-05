@@ -19,6 +19,7 @@
 #include "../Core/StateMigration.h"
 #include "../Dsp/ColorEngine.h"
 #include "../Dsp/Crossover.h"
+#include "../Dsp/AutoLevel.h"
 #include "../Dsp/BehaviorDetector.h"
 #include "../Dsp/HarmonicSpace.h"
 #include "../Dsp/NonlinearStage.h"
@@ -2061,6 +2062,263 @@ namespace
 }
 
 // ================================================================================
+//  Phase 17: Auto Level measured the way people hear
+// ================================================================================
+namespace
+{
+    //  An offline K-weighted loudness, independent of the plug-in's own
+    //  implementation: BS.1770's two filter stages, then mean square, then the
+    //  LKFS constant. Ungated - these renders are continuous programme.
+    double loudnessLkfs (const std::vector<float>& x, double sr)
+    {
+        //  High shelf, 1681.97 Hz, Q 0.7071752, +3.99984 dB.
+        auto designShelf = [sr] (double* b, double* a)
+        {
+            const double A = std::pow (10.0, 3.99984 / 40.0);
+            const double w0 = 2.0 * MathConstants<double>::pi * 1681.97 / sr;
+            const double cosw = std::cos (w0), sinw = std::sin (w0);
+            const double alpha = sinw / (2.0 * 0.7071752);
+            const double beta = 2.0 * std::sqrt (A) * alpha;
+            const double a0 = (A + 1.0) - (A - 1.0) * cosw + beta;
+            b[0] = A * ((A + 1.0) + (A - 1.0) * cosw + beta) / a0;
+            b[1] = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw) / a0;
+            b[2] = A * ((A + 1.0) + (A - 1.0) * cosw - beta) / a0;
+            a[0] = 2.0 * ((A - 1.0) - (A + 1.0) * cosw) / a0;
+            a[1] = ((A + 1.0) - (A - 1.0) * cosw - beta) / a0;
+        };
+
+        //  High pass, 38.13547 Hz, Q 0.5003271.
+        auto designHp = [sr] (double* b, double* a)
+        {
+            const double w0 = 2.0 * MathConstants<double>::pi * 38.13547 / sr;
+            const double cosw = std::cos (w0), sinw = std::sin (w0);
+            const double alpha = sinw / (2.0 * 0.5003271);
+            const double a0 = 1.0 + alpha;
+            b[0] = (1.0 + cosw) * 0.5 / a0;
+            b[1] = -(1.0 + cosw) / a0;
+            b[2] = (1.0 + cosw) * 0.5 / a0;
+            a[0] = -2.0 * cosw / a0;
+            a[1] = (1.0 - alpha) / a0;
+        };
+
+        double sb[3], sa[2], hb[3], ha[2];
+        designShelf (sb, sa);
+        designHp (hb, ha);
+
+        double sz1 = 0.0, sz2 = 0.0, hz1 = 0.0, hz2 = 0.0, sumSq = 0.0;
+
+        for (float v : x)
+        {
+            double y = sb[0] * v + sz1;
+            sz1 = sb[1] * v - sa[0] * y + sz2;
+            sz2 = sb[2] * v - sa[1] * y;
+
+            const double u = y;
+            y = hb[0] * u + hz1;
+            hz1 = hb[1] * u - ha[0] * y + hz2;
+            hz2 = hb[2] * u - ha[1] * y;
+
+            sumSq += y * y;
+        }
+
+        const double ms = sumSq / (double) (x.empty() ? 1 : x.size());
+        return -0.691 + 10.0 * std::log10 (jmax (1.0e-20, ms));
+    }
+}
+
+static void testAutoLevelIsPerceptual()
+{
+    section ("Phase 17: Auto Level holds loudness, not RMS");
+
+    const double sr = 48000.0;
+    const int block = 512;
+
+    //  The brief specifies this on bass / melody / drums / pad / vocal / full
+    //  mix. Auto Level is a matcher for programme material; judging it on a
+    //  9 kHz sine into FUZZ measures the +/-12 dB clamp, not the matcher.
+    auto bass = [sr] (int s) {
+        const double t = (double) s / sr, beat = std::fmod (t, 0.5);
+        const double roots[] = { 55.0, 82.5, 110.0, 98.0 };
+        const double f = roots[((int) (std::fmod (t, 2.0) / 0.5)) & 3];
+        return 0.45f * (float) (std::exp (-beat * 1.6)
+                   * (std::sin (MathConstants<double>::twoPi * f * t)
+                      + 0.30 * std::sin (MathConstants<double>::twoPi * f * 2.0 * t)));
+    };
+    auto melody = [sr] (int s) {
+        const double t = (double) s / sr, e = std::fmod (t, 0.25);
+        const double scale[] = { 440.0, 523.25, 587.33, 659.25 };
+        const double f = scale[((int) (std::fmod (t, 2.0) / 0.25)) & 3];
+        return 0.34f * (float) (std::exp (-e * 7.0)
+                   * (std::sin (MathConstants<double>::twoPi * f * e)
+                      + 0.35 * std::sin (MathConstants<double>::twoPi * f * 2.0 * e)));
+    };
+    auto drums = [sr] (int s) {
+        const double t = (double) s / sr, beat = std::fmod (t, 0.5), e = std::fmod (t, 0.25);
+        const double kf = 105.0 * std::exp (-beat * 20.0) + 46.0;
+        auto rng = (uint32) (s * 22695477u + 1u);
+        rng ^= rng >> 15; rng *= 2246822519u; rng ^= rng >> 13;
+        const double noise = ((double) (rng & 0xffff) / 32768.0) - 1.0;
+        return (float) (0.62 * std::exp (-beat * 12.0)
+                            * std::sin (MathConstants<double>::twoPi * kf * beat)
+                        + 0.16 * std::exp (-e * 70.0) * noise);
+    };
+    auto pad = [sr] (int s) {
+        const double t = (double) s / sr;
+        double v = 0.0;
+        for (double f : { 110.0, 164.81, 220.0 })
+            for (int h = 1; h <= 5; ++h)
+                v += (0.11 / h) * std::sin (MathConstants<double>::twoPi * f * h * t);
+        return (float) v;
+    };
+    auto vocal = [sr] (int s) {
+        const double t = (double) s / sr;
+        const double f0 = 196.0 * (1.0 + 0.012 * std::sin (MathConstants<double>::twoPi * 5.2 * t));
+        double v = 0.0;
+        for (int h = 1; h <= 16; ++h)
+        {
+            const double f = f0 * h;
+            double gain = 0.16 / h;
+            for (double fm : { 700.0, 1200.0, 2600.0 })
+                gain += 0.30 / (1.0 + std::pow ((f - fm) / 110.0, 2.0)) / h;
+            v += gain * std::sin (MathConstants<double>::twoPi * f * t);
+        }
+        return (float) (v * 0.8);
+    };
+
+    struct Case { const char* name; std::function<float (int)> source; ColorType color; float drive; };
+    const Case cases[] = {
+        { "bass",     bass,   ColorType::warm, 60.0f },
+        { "melody",   melody, ColorType::bite, 55.0f },
+        { "drums",    drums,  ColorType::iron, 60.0f },
+        { "pad",      pad,    ColorType::warm, 50.0f },
+        { "vocal",    vocal,  ColorType::bite, 50.0f },
+        { "full mix", [&] (int s) { return 0.55f * drums (s) + 0.55f * bass (s)
+                                         + 0.35f * melody (s) + 0.30f * pad (s); },
+                              ColorType::iron, 45.0f },
+    };
+
+    std::vector<double> errors;
+
+    for (const auto& c : cases)
+    {
+        auto render = [&] (bool autoLevel)
+        {
+            FourColorEngine engine;
+            engine.prepare (sr, block, 1);
+
+            EngineParameters p;
+            p.autoLevel = autoLevel;
+            for (auto& b : p.bands)
+            {
+                b.color = c.color;
+                b.drive = c.drive;
+                b.space = 0.0f;
+            }
+            engine.setParameters (p);
+
+            AudioBuffer<float> io (1, block);
+            std::vector<float> in, out;
+            int s = 0;
+
+            //  Four seconds, of which the first two are discarded: the
+            //  correction glides over 1.5 s by design.
+            for (int blk = 0; blk < 375; ++blk)
+            {
+                auto* d = io.getWritePointer (0);
+                for (int i = 0; i < block; ++i, ++s)
+                    d[i] = c.source (s);
+
+                if (blk >= 188)
+                    for (int i = 0; i < block; ++i)
+                        in.push_back (d[i]);
+
+                engine.setParameters (p);
+                engine.process (io);
+
+                if (blk >= 188)
+                    for (int i = 0; i < block; ++i)
+                        out.push_back (io.getSample (0, i));
+            }
+
+            return std::pair<double, double> { loudnessLkfs (in, sr), loudnessLkfs (out, sr) };
+        };
+
+        const auto off = render (false);
+        const auto on  = render (true);
+
+        const double errorOff = std::abs (off.second - off.first);
+        const double errorOn  = std::abs (on.second - on.first);
+        errors.push_back (errorOn);
+
+        std::printf ("      %-10s loudness error: %.2f LU off -> %.2f LU on\n",
+                     c.name, errorOff, errorOn);
+    }
+
+    std::sort (errors.begin(), errors.end());
+    const size_t half = errors.size() / 2;
+    const double median = (errors.size() % 2 == 0)
+                              ? 0.5 * (errors[half - 1] + errors[half])
+                              : errors[half];
+    const double worst = errors.back();
+
+    check (median < 0.35,
+           "median loudness error is under 0.35 LU (" + String (median, 2) + ")");
+    check (worst < 0.75,
+           "worst loudness error is under 0.75 LU (" + String (worst, 2) + ")");
+}
+
+static void testAutoLevelHoldsInSilence()
+{
+    section ("Phase 17: Auto Level does not drift in silence");
+
+    const double sr = 48000.0;
+    const int block = 512;
+
+    AutoLevel autoLevel;
+    autoLevel.prepare (sr, block);
+    autoLevel.setEnabled (true);
+
+    AudioBuffer<float> buffer (2, block);
+
+    //  Eight seconds of programme, which is more than five glide constants:
+    //  sampling the gain while it is still converging measures the tail of the
+    //  glide and calls it drift.
+    for (int blk = 0; blk < 750; ++blk)
+    {
+        for (int i = 0; i < block; ++i)
+        {
+            const auto v = 0.4f * (float) std::sin (0.03 * (blk * block + i));
+            buffer.setSample (0, i, v);
+            buffer.setSample (1, i, v);
+        }
+        autoLevel.measureInput (buffer, block, 2);
+        buffer.applyGain (0.5f);                    // stand in for the wet chain
+        autoLevel.apply (buffer, block, 2);
+    }
+
+    const float established = autoLevel.getCurrentGain();
+
+    //  ...then five seconds of digital black.
+    float worstDriftDb = 0.0f;
+    for (int blk = 0; blk < 470; ++blk)
+    {
+        buffer.clear();
+        autoLevel.measureInput (buffer, block, 2);
+        autoLevel.apply (buffer, block, 2);
+
+        const float driftDb = std::abs (Decibels::gainToDecibels (autoLevel.getCurrentGain()
+                                                                  / jmax (1.0e-6f, established)));
+        worstDriftDb = jmax (worstDriftDb, driftDb);
+    }
+
+    std::printf ("      gain %.4f established, worst drift over 5 s of silence %.4f dB\n",
+                 established, worstDriftDb);
+
+    check (worstDriftDb < 0.25f,
+           "the correction holds still in silence (" + String (worstDriftDb, 4) + " dB)");
+}
+
+// ================================================================================
 //  Phase 15: the Behavior detector never stops watching
 // ================================================================================
 namespace
@@ -3927,6 +4185,8 @@ int main()
     testGlobalDrive();
     testGlobalTone();
     testAutoLevel();
+    testAutoLevelIsPerceptual();
+    testAutoLevelHoldsInSilence();
     testMixNoCombFiltering();
 
     testPresets();

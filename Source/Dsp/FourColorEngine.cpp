@@ -20,7 +20,7 @@ namespace fourcolor
         mixDryBuffer.setSize (numChannels, maxBlockSize);
         apRefBuffer.setSize (numChannels, maxBlockSize);
 
-        autoLevel.prepare (sampleRate);
+        autoLevel.prepare (sampleRate, maxBlockSize);
 
         const int maxDelay = (int) std::ceil (bands[0].getNonlinearStage().getMaxLatencySamples()) + 8;
         const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) maxBlockSize,
