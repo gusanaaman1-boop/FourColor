@@ -58,17 +58,21 @@ passes on macOS. Send me the line; each check prints its measured value.
 INSTALL IT
 ------------------------------------------------------------------------------
 
-Open an ADMINISTRATOR Command Prompt, then:
+The build already assembled everything into:
 
-  xcopy /E /I /Y "C:\dev\FourColor\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3" "C:\Program Files\Common Files\VST3\FourColor.vst3"
+  dist\FourColor-windows-x64\
 
-Copy the .vst3 FOLDER, not its contents - a VST3 on Windows is a directory.
+Go into that folder and:
 
-In Cubase: Studio > VST Plug-in Manager > Update. It appears under Naaman,
-category Distortion.
+  RIGHT-CLICK  INSTALL-FOUR-COLOR.bat  ->  "Run as administrator"
 
-The standalone, if you want it without Cubase:
-  build-win\FourColor_artefacts\Release\Standalone\FourColor.exe
+Close Cubase first - Windows will not replace a plugin a running host has open.
+
+The installer checks every step and stops with a reason rather than claiming
+success. If it stops, send me a screenshot of the window; the path it prints
+is the clue. To start clean, UNINSTALL-FOUR-COLOR.bat is in the same folder.
+
+That folder is also exactly what you would zip and send to somebody else.
 
 ------------------------------------------------------------------------------
 WHAT TO CHECK ONCE IT LOADS
