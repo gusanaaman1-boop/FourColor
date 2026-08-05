@@ -107,6 +107,20 @@ namespace
         }
     }
 
+    //  Performance assertions. A CPU number measured in an unoptimised Debug
+    //  build says nothing about the shipped plug-in - it is routinely 5x slower
+    //  - so Debug reports the measurement and does not judge it. Lowering the
+    //  Release thresholds to accommodate Debug would be tuning a test to pass.
+    void checkPerformance ([[maybe_unused]] bool condition, const String& what)
+    {
+       #if JUCE_DEBUG
+        ++checksRun;
+        std::printf ("  --  %s   [performance check skipped: Debug build]\n", what.toRawUTF8());
+       #else
+        check (condition, what);
+       #endif
+    }
+
     void checkNear (double measured, double expected, double tolerance, const String& what)
     {
         check (std::abs (measured - expected) <= tolerance,
@@ -142,7 +156,7 @@ namespace
         return peak;
     }
 
-    double rmsOf (const AudioBuffer<float>& b, int channel = 0)
+    [[maybe_unused]] double rmsOf (const AudioBuffer<float>& b, int channel = 0)
     {
         return b.getRMSLevel (channel, 0, b.getNumSamples());
     }
@@ -159,7 +173,7 @@ namespace
         return true;
     }
 
-    double dcOf (const AudioBuffer<float>& b, int channel = 0)
+    [[maybe_unused]] double dcOf (const AudioBuffer<float>& b, int channel = 0)
     {
         double sum = 0.0;
         auto* d = b.getReadPointer (channel);
@@ -2158,7 +2172,7 @@ static void testCpuBudget()
         std::printf ("      %dx: %.2f s CPU for %.1f s audio = %.1fx realtime\n",
                      oversamplingFactorFor (quality), seconds, audioSeconds, realtimeFactor);
 
-        check (realtimeFactor > 8.0, String (oversamplingFactorFor (quality))
+        checkPerformance (realtimeFactor > 8.0, String (oversamplingFactorFor (quality))
                    + "x runs faster than 8x realtime (" + String (realtimeFactor, 1) + "x)");
     }
 }
@@ -2329,9 +2343,9 @@ static void testAnalyzerCpu()
                  "                      every surface forced to redraw each frame)\n",
                  wholeMs, wholeLoad);
 
-    check (analyzerLoad < 15.0, "analyzer repaint stays under 15% of one core ("
+    checkPerformance (analyzerLoad < 15.0, "analyzer repaint stays under 15% of one core ("
                                     + String (analyzerLoad, 1) + "%)");
-    check (wholeLoad < 40.0, "forced full-editor redraw stays under 40% of one core ("
+    checkPerformance (wholeLoad < 40.0, "forced full-editor redraw stays under 40% of one core ("
                                  + String (wholeLoad, 1) + "%)");
 }
 

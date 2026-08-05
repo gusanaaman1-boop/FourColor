@@ -220,9 +220,9 @@ namespace fourcolor::ui
         //  Inner shadow along the top edge.
         for (int i = 0; i < 6; ++i)
         {
-            g.setColour (juce::Colours::black.withAlpha (0.20f * (1.0f - i / 6.0f)));
-            g.drawLine (full.getX() + metric::corner, full.getY() + 1.0f + i,
-                        full.getRight() - metric::corner, full.getY() + 1.0f + i, 1.0f);
+            g.setColour (juce::Colours::black.withAlpha (0.20f * (1.0f - (float) i / 6.0f)));
+            g.drawLine (full.getX() + metric::corner, full.getY() + 1.0f + (float) i,
+                        full.getRight() - metric::corner, full.getY() + 1.0f + (float) i, 1.0f);
         }
 
         //  --- grid ---------------------------------------------------------------
@@ -380,7 +380,7 @@ namespace fourcolor::ui
             //  Side contours.
             for (int k = 0; k < 2; ++k)
             {
-                g.setColour (c.withAlpha ((isSel ? 0.34f : 0.16f) * (1.0f - 0.20f * k)));
+                g.setColour (c.withAlpha ((isSel ? 0.34f : 0.16f) * (1.0f - 0.20f * (float) k)));
                 g.strokePath (sideOutline[k], juce::PathStrokeType (1.0f));
             }
 
@@ -455,7 +455,7 @@ namespace fourcolor::ui
 
             g.setColour (tokens::textPrimary.withAlpha (0.9f));
             for (int d = 0; d < 3; ++d)
-                g.fillEllipse (x - 1.6f, pill.getY() + 7.5f + d * 6.0f, 3.2f, 3.2f);
+                g.fillEllipse (x - 1.6f, pill.getY() + 7.5f + (float) d * 6.0f, 3.2f, 3.2f);
 
             //  Value above the plot.
             g.setFont (uiFont (11.0f));

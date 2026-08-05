@@ -1,0 +1,61 @@
+# FOUR COLOR - Windows 11 / MSVC x64 build and test.
+#
+# This runs the same steps as scripts/build-windows.bat. Its job is to prove the
+# code compiles and the DSP suite passes on the platform the product actually
+# targets (Cubase 15 on Windows), which no machine in this workspace can do.
+#
+# Everything is pinned: an unpinned runner image or JUCE branch turns a red
+# build into "something upstream moved", which is the least useful failure.
+
+name: windows
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022          # pinned image, not windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Release, Debug]
+
+    steps:
+      - name: Check out FOUR COLOR
+        uses: actions/checkout@v4
+
+      - name: Check out JUCE 9 (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          # The exact JUCE 9 commit this workspace develops against (2026-07-22).
+          ref: 857aab9c4eb3084af639a380a693dcec7d728b73
+          path: JUCE
+
+      - name: Configure
+        shell: cmd
+        run: >
+          cmake -B build -G "Visual Studio 17 2022" -A x64
+          -DFOURCOLOR_COPY_AFTER_BUILD=OFF
+          -DFOURCOLOR_WERROR=ON
+
+      - name: Build
+        shell: cmd
+        run: cmake --build build --config ${{ matrix.config }} --parallel
+
+      - name: Run the DSP and state suite
+        shell: cmd
+        run: build\FourColorTests_artefacts\${{ matrix.config }}\FourColorTests.exe
+
+      - name: Upload artefacts
+        if: matrix.config == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FourColor-windows-x64
+          path: |
+            build/FourColor_artefacts/Release/VST3/
+            build/FourColor_artefacts/Release/Standalone/
+          if-no-files-found: error

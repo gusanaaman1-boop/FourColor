@@ -34,7 +34,7 @@ namespace fourcolor
 
         for (int i = 0; i < 16; ++i)
         {
-            const float phase = (i + 0.5f) * (juce::MathConstants<float>::pi / 16.0f);
+            const float phase = ((float) i + 0.5f) * (juce::MathConstants<float>::pi / 16.0f);
             const float x = ref * std::sin (phase);
             const float y = staticShape (x * preGain);
             inPower  += x * x;

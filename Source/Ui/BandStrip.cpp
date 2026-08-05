@@ -277,20 +277,20 @@ namespace fourcolor::ui
         auto area = getLocalBounds().reduced (16, 12);
         const int w = area.getWidth();
 
-        colorArea = area.removeFromLeft (juce::roundToInt (w * 0.155f));
+        colorArea = area.removeFromLeft (juce::roundToInt ((float) w * 0.155f));
         area.removeFromLeft (8);
 
-        drive->setBounds (area.removeFromLeft (juce::roundToInt (w * 0.17f)));
+        drive->setBounds (area.removeFromLeft (juce::roundToInt ((float) w * 0.17f)));
         area.removeFromLeft (6);
 
-        behaviorArea = area.removeFromLeft (juce::roundToInt (w * 0.305f));
+        behaviorArea = area.removeFromLeft (juce::roundToInt ((float) w * 0.305f));
         behaviorSlider.setBounds (behaviorArea.withTrimmedTop (24)
                                               .withTrimmedBottom (24)
                                               .reduced (14, 0));
         area.removeFromLeft (6);
 
-        tone->setBounds (area.removeFromLeft (juce::roundToInt (w * 0.135f)));
-        space->setBounds (area.removeFromLeft (juce::roundToInt (w * 0.140f)));
+        tone->setBounds (area.removeFromLeft (juce::roundToInt ((float) w * 0.135f)));
+        space->setBounds (area.removeFromLeft (juce::roundToInt ((float) w * 0.140f)));
 
         area.removeFromLeft (10);
         dividerX = area.getX();

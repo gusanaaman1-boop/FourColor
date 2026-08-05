@@ -29,6 +29,33 @@ else()
 endif()
 
 option(FOURCOLOR_COPY_AFTER_BUILD "Copy built plug-ins into the user plug-in folders" ON)
+option(FOURCOLOR_WERROR "Treat warnings in FOUR COLOR's own sources as errors" OFF)
+option(FOURCOLOR_SANITIZERS "Add a FourColorTestsSan target built with ASan/UBSan" OFF)
+
+# Warning policy. JUCE's module sources are compiled into our targets, so a
+# blanket -Werror on the target would fail on third-party code we do not own.
+# These flags are attached to FOUR COLOR's own translation units only, which is
+# what "0 warnings from FOUR COLOR code" can honestly mean.
+if(MSVC)
+    set(FOURCOLOR_WARNING_FLAGS /W4 /permissive-)
+    if(FOURCOLOR_WERROR)
+        list(APPEND FOURCOLOR_WARNING_FLAGS /WX)
+    endif()
+else()
+    # Deliberately NOT enabled: -Wconversion, -Wsign-conversion,
+    # -Wdouble-promotion and -Wfloat-equal. Measured on this tree they produce
+    # 262 hits, essentially all of them intentional float/int arithmetic in
+    # JUCE-idiomatic graphics and DSP code (`(float) i / count`, passing a float
+    # to a double-precision std:: function). Silencing them would mean 262 casts
+    # that change no behaviour and hide the few that might matter. The set below
+    # is strict and reaches a genuine zero.
+    set(FOURCOLOR_WARNING_FLAGS
+        -Wall -Wextra -Wpedantic -Wshadow -Wcast-align -Wunused
+        -Woverloaded-virtual -Wnon-virtual-dtor -Wimplicit-fallthrough)
+    if(FOURCOLOR_WERROR)
+        list(APPEND FOURCOLOR_WARNING_FLAGS -Werror)
+    endif()
+endif()
 
 juce_add_plugin(FourColor
     COMPANY_NAME "Naaman"
@@ -65,6 +92,16 @@ set(FOURCOLOR_CORE_SOURCES
     Source/Ui/TopBar.cpp
     Source/PluginEditor.cpp
     Source/PluginProcessor.cpp)
+
+set(FOURCOLOR_OWN_SOURCES
+    ${FOURCOLOR_CORE_SOURCES}
+    Source/Tools/test_dsp.cpp)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Source/Tools/screenshot_tool.cpp")
+    list(APPEND FOURCOLOR_OWN_SOURCES Source/Tools/screenshot_tool.cpp)
+endif()
+
+set_source_files_properties(${FOURCOLOR_OWN_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "${FOURCOLOR_WARNING_FLAGS}")
 
 target_sources(FourColor PRIVATE ${FOURCOLOR_CORE_SOURCES})
 
@@ -114,4 +151,34 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Source/Tools/screenshot_tool.cpp")
     target_link_libraries(FourColorShot
         PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_gui_extra
         PUBLIC juce::juce_recommended_config_flags)
+endif()
+
+# --- sanitiser build of the test suite (opt-in) --------------------------------
+#     cmake -B build-san -DFOURCOLOR_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
+#     build-san/FourColorTestsSan_artefacts/Debug/FourColorTestsSan
+#
+# ASan + UBSan on Clang/GCC; MSVC has /fsanitize=address but no UBSan, so the
+# Windows build gets ASan only. Kept as a separate target because sanitisers
+# make the suite roughly 8x slower and must never be the default.
+if(FOURCOLOR_SANITIZERS)
+    juce_add_console_app(FourColorTestsSan PRODUCT_NAME "FourColorTestsSan")
+    juce_generate_juce_header(FourColorTestsSan)
+    target_sources(FourColorTestsSan PRIVATE Source/Tools/test_dsp.cpp ${FOURCOLOR_CORE_SOURCES})
+    target_compile_definitions(FourColorTestsSan PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1
+        JUCE_DISPLAY_SPLASH_SCREEN=0)
+    target_link_libraries(FourColorTestsSan
+        PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_gui_extra
+        PUBLIC juce::juce_recommended_config_flags)
+
+    if(MSVC)
+        target_compile_options(FourColorTestsSan PRIVATE /fsanitize=address)
+    else()
+        target_compile_options(FourColorTestsSan PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
+        target_link_options(FourColorTestsSan PRIVATE -fsanitize=address,undefined)
+    endif()
 endif()

@@ -2,8 +2,8 @@
 
 namespace fourcolor
 {
-    FourColorEditor::FourColorEditor (FourColorProcessor& proc)
-        : AudioProcessorEditor (proc), processor (proc)
+    FourColorEditor::FourColorEditor (FourColorProcessor& p)
+        : AudioProcessorEditor (p), proc (p)
     {
         setLookAndFeel (&laf);
 
@@ -14,7 +14,7 @@ namespace fourcolor
         addAndMakeVisible (globalBar);
 
         selectedBand = juce::jlimit (0, numBands - 1,
-                                     (int) processor.apvts.state.getProperty ("selectedBand", 0));
+                                     (int) proc.apvts.state.getProperty ("selectedBand", 0));
         analyzer.setSelectedBand (selectedBand);
         bandCards.setSelectedBand (selectedBand);
         bandStrip.setBand (selectedBand);
@@ -32,8 +32,8 @@ namespace fourcolor
         setResizable (true, true);
         setResizeLimits (900, 560, 1900, 1200);
 
-        const int w = (int) processor.apvts.state.getProperty ("editorWidth", 980);
-        const int h = (int) processor.apvts.state.getProperty ("editorHeight", 620);
+        const int w = (int) proc.apvts.state.getProperty ("editorWidth", 980);
+        const int h = (int) proc.apvts.state.getProperty ("editorHeight", 620);
         setSize (juce::jlimit (900, 1900, w), juce::jlimit (560, 1200, h));
 
         startTimerHz (12);
@@ -50,7 +50,7 @@ namespace fourcolor
         analyzer.setSelectedBand (selectedBand);
         bandCards.setSelectedBand (selectedBand);
         bandStrip.setBand (selectedBand);
-        processor.apvts.state.setProperty ("selectedBand", selectedBand, nullptr);
+        proc.apvts.state.setProperty ("selectedBand", selectedBand, nullptr);
     }
 
     void FourColorEditor::timerCallback()
@@ -58,12 +58,12 @@ namespace fourcolor
         //  Undo granularity: close the running transaction whenever the mouse
         //  is up, so one drag or click undoes as a single step.
         if (! juce::Desktop::getInstance().getMainMouseSource().isDragging()
-            && processor.undoManager.getNumActionsInCurrentTransaction() > 0)
-            processor.undoManager.beginNewTransaction();
+            && proc.undoManager.getNumActionsInCurrentTransaction() > 0)
+            proc.undoManager.beginNewTransaction();
 
         //  Feed the selected band's real output level to the DRIVE sparks and
         //  the SPACE arcs, so they rest when there is no audio.
-        const float peak = processor.getEngine().getBand (selectedBand).readAndResetOutputPeak();
+        const float peak = proc.getEngine().getBand (selectedBand).readAndResetOutputPeak();
         bandStrip.setEnergy (juce::jlimit (0.0f, 1.0f, peak * 1.6f));
     }
 
@@ -78,8 +78,8 @@ namespace fourcolor
 
     void FourColorEditor::resized()
     {
-        processor.apvts.state.setProperty ("editorWidth", getWidth(), nullptr);
-        processor.apvts.state.setProperty ("editorHeight", getHeight(), nullptr);
+        proc.apvts.state.setProperty ("editorWidth", getWidth(), nullptr);
+        proc.apvts.state.setProperty ("editorHeight", getHeight(), nullptr);
 
         const float h = (float) getHeight();
         const float w = (float) getWidth();

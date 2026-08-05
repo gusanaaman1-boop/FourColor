@@ -202,7 +202,7 @@ namespace fourcolor::ui
         g.fillRect (0.0f, bounds.getBottom() - 1.0f, bounds.getWidth(), 1.0f);
         for (int i = 0; i < 5; ++i)
         {
-            g.setColour (juce::Colours::black.withAlpha (0.38f * (1.0f - i / 5.0f) * 0.5f));
+            g.setColour (juce::Colours::black.withAlpha (0.38f * (1.0f - (float) i / 5.0f) * 0.5f));
             g.fillRect (0.0f, bounds.getBottom() + (float) i, bounds.getWidth(), 1.0f);
         }
 
@@ -244,7 +244,7 @@ namespace fourcolor::ui
 
         //  Preset browser is ~26% of the window and stays centred; A/B and undo
         //  sit immediately to its right, as in the reference.
-        const int presetW = juce::jlimit (170, 340, juce::roundToInt (getWidth() * 0.26f));
+        const int presetW = juce::jlimit (170, 340, juce::roundToInt ((float) getWidth() * 0.26f));
         const int groupW = presetW + 56 + 14 + 76 + 10 + 26;
         auto group = area.withSizeKeepingCentre (juce::jmin (area.getWidth(), groupW),
                                                  area.getHeight());

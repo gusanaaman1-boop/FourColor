@@ -33,14 +33,14 @@ namespace fourcolor
         void timerCallback() override;
         void selectBand (int band);
 
-        FourColorProcessor& processor;
+        FourColorProcessor& proc;
 
         ui::Laf laf;
-        ui::TopBar topBar { processor };
-        ui::Analyzer analyzer { processor };
-        ui::BandCards bandCards { processor };
-        ui::BandStrip bandStrip { processor.apvts };
-        ui::GlobalBar globalBar { processor };
+        ui::TopBar topBar { proc };
+        ui::Analyzer analyzer { proc };
+        ui::BandCards bandCards { proc };
+        ui::BandStrip bandStrip { proc.apvts };
+        ui::GlobalBar globalBar { proc };
         juce::TooltipWindow tooltips { this, 550 };
 
         int selectedBand = 0;

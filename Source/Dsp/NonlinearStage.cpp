@@ -28,7 +28,7 @@ namespace fourcolor
         for (int e = 0; e < 4; ++e)
         {
             engines[e] = createColorEngine ((ColorType) e);
-            engines[e]->prepare (baseRate * oversamplers[activeQuality]->getOversamplingFactor(),
+            engines[e]->prepare (baseRate * (double) oversamplers[activeQuality]->getOversamplingFactor(),
                                  channels);
         }
 
@@ -67,7 +67,7 @@ namespace fourcolor
 
         //  Re-derive engine time constants for the new engine-side rate.
         //  ColorEngine::prepare only computes coefficients - no allocation.
-        const double engineRate = baseRate * oversamplers[activeQuality]->getOversamplingFactor();
+        const double engineRate = baseRate * (double) oversamplers[activeQuality]->getOversamplingFactor();
         for (auto& e : engines)
             e->prepare (engineRate, channels);
 

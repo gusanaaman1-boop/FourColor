@@ -16,11 +16,11 @@ namespace fourcolor::dsp
     //  share one coefficient computation across channels and sections.
     struct TptSvf
     {
-        //  g = tan(pi * fc / fs), k = 1/Q. Butterworth: k = sqrt(2).
-        void setCoefficients (float g, float k) noexcept
+        //  g = tan(pi * fc / fs), damping = 1/Q. Butterworth: damping = sqrt(2).
+        void setCoefficients (float g, float damping) noexcept
         {
-            this->k = k;
-            a1 = 1.0f / (1.0f + g * (g + k));
+            k  = damping;
+            a1 = 1.0f / (1.0f + g * (g + damping));
             a2 = g * a1;
             a3 = g * a2;
         }
