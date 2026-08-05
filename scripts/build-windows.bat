@@ -111,16 +111,45 @@ for %%C in (%CONFIGS%) do (
     )
 )
 
+REM --- assemble a ready-to-run installer folder ---------------------------------
+REM The point is that nobody has to copy anything by hand: after this, the
+REM folder below contains the plug-in AND the installer that puts it where it
+REM belongs, and it is also exactly what you would zip and send to somebody.
+set "PKG=dist\FourColor-windows-x64"
+
+if exist "%BUILD_DIR%\FourColor_artefacts\Release\VST3\FourColor.vst3" (
+    echo.
+    echo == packaging -^> %PKG%
+    if exist "%PKG%" rmdir /s /q "%PKG%"
+    mkdir "%PKG%" 2>nul
+
+    xcopy /e /i /y "%BUILD_DIR%\FourColor_artefacts\Release\VST3\FourColor.vst3" ^
+                   "%PKG%\FourColor.vst3\" >nul
+    if exist "%BUILD_DIR%\FourColor_artefacts\Release\Standalone\FourColor.exe" ^
+        copy /y "%BUILD_DIR%\FourColor_artefacts\Release\Standalone\FourColor.exe" "%PKG%\" >nul
+
+    copy /y "packaging\INSTALL-FOUR-COLOR.bat"   "%PKG%\" >nul
+    copy /y "packaging\UNINSTALL-FOUR-COLOR.bat" "%PKG%\" >nul
+    copy /y "packaging\README-WINDOWS.txt"       "%PKG%\" >nul
+
+    if not exist "%PKG%\FourColor.vst3\Contents\x86_64-win\FourColor.vst3" (
+        echo   [X] the packaged VST3 is missing its binary - something is wrong
+        exit /b 1
+    )
+    echo   packaged and verified.
+)
+
 echo.
-echo Artefacts:
-if exist "%BUILD_DIR%\FourColor_artefacts\Release\VST3\FourColor.vst3" ^
-    echo   %BUILD_DIR%\FourColor_artefacts\Release\VST3\FourColor.vst3
-if exist "%BUILD_DIR%\FourColor_artefacts\Release\Standalone\FourColor.exe" ^
-    echo   %BUILD_DIR%\FourColor_artefacts\Release\Standalone\FourColor.exe
+echo  ============================================
+echo    TO INSTALL:
 echo.
-echo To install for Cubase, copy the .vst3 FOLDER (not just its contents) into:
-echo   C:\Program Files\Common Files\VST3\
-echo That needs an administrator Command Prompt.
+echo    1. cd %PKG%
+echo    2. RIGHT-CLICK INSTALL-FOUR-COLOR.bat
+echo       -^> "Run as administrator"
+echo.
+echo    That folder is also what you would zip
+echo    and send to somebody else.
+echo  ============================================
 echo.
 echo Then work through docs\CUBASE-CHECKLIST.md and fill in the Windows column.
 endlocal
