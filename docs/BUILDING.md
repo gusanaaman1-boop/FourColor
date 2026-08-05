@@ -1,14 +1,14 @@
 # FOUR COLOR — building and validating
 
-VST3 + AU + Standalone, JUCE 9, C++20. macOS is the development machine and runs Cubase 15;
-**Windows 11 is the product target and has never been compiled or run** — see
-[CUBASE-CHECKLIST.md](CUBASE-CHECKLIST.md).
+VST3 + AU + Standalone, JUCE 9, C++20. macOS is the development machine and runs Cubase 15.
+**Windows 11 is the product target, and as of 2026-08-05 it builds and runs there** — see
+[CUBASE-CHECKLIST.md](CUBASE-CHECKLIST.md), whose Windows column is still to be filled in.
 
 ## Pinned toolchain
 
 Pinned so that a red build means "our code broke", not "something upstream moved".
 
-| | macOS (verified) | Windows (not yet run) |
+| | macOS (verified) | Windows (builds and runs; details not yet recorded) |
 | --- | --- | --- |
 | OS | macOS 26.3.2 | Windows 11 x64 |
 | Compiler | Apple clang 21.0.0 (`clang-2100.1.1.101`) | MSVC v143 (Visual Studio 2022, 17.x) |

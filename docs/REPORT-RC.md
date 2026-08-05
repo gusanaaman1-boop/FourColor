@@ -1,11 +1,13 @@
 # FOUR COLOR — end of the 30% round
 
-**Status: not a Release Candidate.** It is a build that is ready to be tried on
-Windows, which is the next thing that has to happen. Three items of the brief
-are outstanding and one acceptance criterion is missed; all four are listed
-below rather than buried.
+**Status: not a Release Candidate, but the platform question is answered.**
+On 2026-08-05 Naaman built the source bundle on his own Windows machine and
+reports the plug-in working well — the first time the commercial target has
+been anything other than theoretical. Three items of the brief remain
+outstanding and one acceptance criterion is missed; all four are listed below
+rather than buried.
 
-Head: `be2d417`. 369 checks, **1 failing** (deliberately — see §5).
+Head: `fbe9e95`. 369 checks, **1 failing** (deliberately — see §5).
 
 ---
 
@@ -19,7 +21,7 @@ Head: `be2d417`. 369 checks, **1 failing** (deliberately — see §5).
 | Debug, all three | OK |
 | ASan + UBSan test build | OK, 0 findings |
 | Warnings from FOUR COLOR sources, `-Werror` on | **0**, Release and Debug |
-| **Windows** | **NEVER COMPILED** |
+| **Windows** | **BUILT AND RUNNING** (2026-08-05, reported by Naaman on his own machine) |
 
 macOS 26.3.2, Apple clang 21.0.0, CMake 4.4.0, JUCE `857aab9c`, universal
 arm64 + x86_64.
@@ -152,7 +154,12 @@ It is worth more as a red check than as a quietly relaxed threshold.
    character changed in Phase 16.
 3. **Phase 16 — character tuning.** The audition pack exists; the listening has
    not happened. This is the checkpoint the brief asked for.
-4. **Windows and Cubase.** Never compiled, never run.
+4. **Windows and Cubase.** Windows now BUILDS and RUNS (2026-08-05) — Naaman
+   built the source bundle on his own machine and reports it working well. The
+   detail behind that has not been captured yet: which rows of the Cubase
+   checklist were exercised, what the test suite printed there, and what
+   latency Cubase reports. Until those are filled in, the Windows column of
+   [CUBASE-CHECKLIST.md](CUBASE-CHECKLIST.md) stays open.
 
 ## 7. Two things about the record
 
@@ -171,9 +178,10 @@ license a Windows claim.
 
 ## 8. Next, in order
 
-1. **Build on Windows.** [WINDOWS-QUICKSTART.md](WINDOWS-QUICKSTART.md). The
-   first MSVC build is the single most informative thing left.
-2. **Work the Cubase checklist**, Windows column.
+1. ~~Build on Windows.~~ **Done, 2026-08-05.** It builds and runs.
+2. **Work the Cubase checklist**, Windows column — the rows, not the
+   impression. Latency reading, save/reopen, offline export null, and what the
+   test suite printed on Windows are the four that matter most.
 3. **Listen to the audition pack** — [AUDITION.md](AUDITION.md) says what for.
    Start with `01-colours/bass-*`, which is where Phase 16 changed most.
 4. Then: preset expansion, residual visualisation, and whatever the listening

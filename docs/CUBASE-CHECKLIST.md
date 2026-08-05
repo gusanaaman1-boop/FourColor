@@ -1,6 +1,9 @@
 # FOUR COLOR — Cubase 15 host validation checklist
 
-**STATUS: NOT YET RUN.**
+**STATUS: Windows BUILDS AND RUNS as of 2026-08-05** — Naaman built the source
+bundle on his own Windows machine and reports the plug-in working well. No row
+below has been formally recorded yet, so they all still read `[ ]`. "It works"
+is excellent news and is not the same thing as a filled-in checklist.
 
 Correcting an earlier claim in this file: **Cubase 15 is installed on this Mac**
 (`/Applications/Cubase 15.app`). What is missing is **Windows**, not Cubase. So this
@@ -9,7 +12,7 @@ checklist has two columns, and they are not interchangeable:
 | Column | What it proves | Status |
 | --- | --- | --- |
 | **macOS** | The VST3/AU is correct as a plug-in: scan, state, automation, PDC, offline export | Possible here, not yet run |
-| **Windows** | The same on the platform the product actually ships to (MSVC codegen, WASAPI/ASIO, Program Files paths) | **Impossible here — no Windows machine** |
+| **Windows** | The same on the platform the product actually ships to (MSVC codegen, WASAPI/ASIO, Program Files paths) | **Builds and runs (2026-08-05); rows not yet recorded** |
 
 A green macOS column does **not** license a Windows claim. Keep them separate.
 
