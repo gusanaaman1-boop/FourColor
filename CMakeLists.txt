@@ -68,6 +68,12 @@ juce_add_plugin(FourColor
     PLUGIN_MANUFACTURER_CODE Naam
     PLUGIN_CODE Fclr
     FORMATS ${FOURCOLOR_FORMATS}
+    #  Without this a VST3 declares only the generic "Fx" subcategory, and
+    #  Cubase files it under Other rather than Distortion - which looks exactly
+    #  like the plug-in failing to appear if you are looking where the README
+    #  told you to look.
+    VST3_CATEGORIES "Fx" "Distortion"
+    AU_MAIN_TYPE kAudioUnitType_Effect
     PRODUCT_NAME "FourColor")
 
 # Everything except the plugin entry points, shared by the plugin and the tools.
