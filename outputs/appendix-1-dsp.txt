@@ -1,0 +1,3008 @@
+
+
+===== FILE: Source/Core/ParameterIds.h =====
+
+// FOUR COLOR parameter identifiers.
+//
+// These strings are frozen: presets and host automation reference them, so they
+// must never change after Phase 1. New parameters may only be appended.
+
+#pragma once
+
+#include <juce_core/juce_core.h>
+
+namespace fourcolor
+{
+    inline constexpr int numBands = 4;
+
+    namespace param
+    {
+        // Global
+        inline constexpr const char* input       = "input";
+        inline constexpr const char* globalDrive = "globalDrive";
+        inline constexpr const char* globalTone  = "globalTone";
+        inline constexpr const char* autoLevel   = "autoLevel";
+        inline constexpr const char* mix         = "mix";
+        inline constexpr const char* output      = "output";
+        inline constexpr const char* quality     = "quality";
+        inline constexpr const char* bypassed    = "bypassed";
+        inline constexpr const char* xover1      = "xover1";
+        inline constexpr const char* xover2      = "xover2";
+        inline constexpr const char* xover3      = "xover3";
+
+        // Per band: "b0_drive", "b3_color", ...
+        inline juce::String band (int bandIndex, const char* suffix)
+        {
+            jassert (bandIndex >= 0 && bandIndex < numBands);
+            return "b" + juce::String (bandIndex) + "_" + suffix;
+        }
+
+        inline constexpr const char* color    = "color";
+        inline constexpr const char* drive    = "drive";
+        inline constexpr const char* behavior = "behavior";
+        inline constexpr const char* tone     = "tone";
+        inline constexpr const char* space    = "space";
+        inline constexpr const char* bandMix  = "bandMix";
+        inline constexpr const char* level    = "level";
+        inline constexpr const char* solo     = "solo";
+        inline constexpr const char* mute     = "mute";
+        inline constexpr const char* bypass   = "bypass";
+    }
+
+    enum class ColorType { warm = 0, iron, bite, fuzz };
+    enum class Quality   { draft = 0, normal, high, ultra };
+
+    inline int oversamplingFactorFor (Quality q) noexcept
+    {
+        switch (q)
+        {
+            case Quality::draft:  return 1;
+            case Quality::normal: return 2;
+            case Quality::high:   return 4;
+            case Quality::ultra:  return 8;
+        }
+        return 4;
+    }
+
+    inline const char* colorName (ColorType c) noexcept
+    {
+        switch (c)
+        {
+            case ColorType::warm: return "WARM";
+            case ColorType::iron: return "IRON";
+            case ColorType::bite: return "BITE";
+            case ColorType::fuzz: return "FUZZ";
+        }
+        return "?";
+    }
+
+    inline const char* bandName (int i) noexcept
+    {
+        constexpr const char* names[] = { "LOW", "LOW MID", "HIGH MID", "HIGH" };
+        return (i >= 0 && i < 4) ? names[i] : "?";
+    }
+}
+
+
+===== FILE: Source/Dsp/TptFilters.h =====
+
+// Small header-only filter primitives used across the DSP.
+//
+// The state-variable filter is the TPT/ZDF formulation (Zavalishin, "The Art
+// of VA Filter Design"), chosen because it stays stable and well-behaved under
+// per-block coefficient modulation - which is what makes dragging a crossover
+// handle during playback safe.
+
+#pragma once
+
+#include <cmath>
+
+namespace fourcolor::dsp
+{
+    //  One second-order TPT SVF section. Outputs low / band / high / allpass
+    //  from the same state. Coefficients are set explicitly so a caller can
+    //  share one coefficient computation across channels and sections.
+    struct TptSvf
+    {
+        //  g = tan(pi * fc / fs), k = 1/Q. Butterworth: k = sqrt(2).
+        void setCoefficients (float g, float k) noexcept
+        {
+            this->k = k;
+            a1 = 1.0f / (1.0f + g * (g + k));
+            a2 = g * a1;
+            a3 = g * a2;
+        }
+
+        void reset() noexcept { ic1 = ic2 = 0.0f; }
+
+        struct Outputs { float low, band, high; };
+
+        Outputs process (float x) noexcept
+        {
+            const float v3 = x - ic2;
+            const float v1 = a1 * ic1 + a2 * v3;   // band
+            const float v2 = ic2 + a2 * ic1 + a3 * v3;   // low
+            ic1 = 2.0f * v1 - ic1;
+            ic2 = 2.0f * v2 - ic2;
+            return { v2, v1, x - k * v1 - v2 };
+        }
+
+        float processLow  (float x) noexcept { return process (x).low; }
+        float processHigh (float x) noexcept { return process (x).high; }
+
+        //  Second-order allpass with the section's Q: (s^2 - k w s + w^2) / D.
+        float processAllpass (float x) noexcept
+        {
+            const auto o = process (x);
+            return x - 2.0f * k * o.band;
+        }
+
+        float a1 = 0.0f, a2 = 0.0f, a3 = 0.0f, k = 1.41421356f;
+        float ic1 = 0.0f, ic2 = 0.0f;
+    };
+
+    inline float svfG (double sampleRate, float cutoffHz) noexcept
+    {
+        //  Clamp well below Nyquist; tan() explodes at fs/2.
+        const float limited = std::fmin (cutoffHz, (float) sampleRate * 0.49f);
+        return std::tan (3.14159265358979f * limited / (float) sampleRate);
+    }
+
+    //  One-pole low-pass (6 dB/oct), also usable as a smoother.
+    struct OnePole
+    {
+        void setCutoff (double sampleRate, float cutoffHz) noexcept
+        {
+            const float x = std::exp (-2.0f * 3.14159265f * cutoffHz / (float) sampleRate);
+            a = 1.0f - x;
+            b = x;
+        }
+
+        void reset (float value = 0.0f) noexcept { z = value; }
+
+        float process (float x) noexcept { z = a * x + b * z; return z; }
+        float processHigh (float x) noexcept { return x - process (x); }
+
+        float a = 1.0f, b = 0.0f, z = 0.0f;
+    };
+
+    //  DC blocker: first-order high-pass around 10 Hz.
+    struct DcBlocker
+    {
+        void prepare (double sampleRate, float cutoffHz = 10.0f) noexcept
+        {
+            R = 1.0f - 2.0f * 3.14159265f * cutoffHz / (float) sampleRate;
+            if (R < 0.9f) R = 0.9f;
+        }
+
+        void reset() noexcept { x1 = y1 = 0.0f; }
+
+        float process (float x) noexcept
+        {
+            const float y = x - x1 + R * y1;
+            x1 = x;
+            y1 = y;
+            return y;
+        }
+
+        float R = 0.995f, x1 = 0.0f, y1 = 0.0f;
+    };
+}
+
+
+===== FILE: Source/Dsp/Crossover.h =====
+
+// Four-band Linkwitz-Riley (24 dB/oct) crossover tree with allpass
+// compensation, so the four bands sum back to a pure allpass of the input:
+// flat magnitude by construction. See docs/ARCHITECTURE.md for the derivation.
+//
+//   lowHalf  = LP4(f2, x)          highHalf = HP4(f2, x)
+//   band0    = AP2(f3, LP4(f1, lowHalf))
+//   band1    = AP2(f3, HP4(f1, lowHalf))
+//   band2    = AP2(f1, LP4(f3, highHalf))
+//   band3    = AP2(f1, HP4(f3, highHalf))
+//
+// Cutoffs are smoothed and coefficients recomputed on a 32-sample control
+// grid, which makes crossover automation click-free without per-sample tan().
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+
+#include "../Core/ParameterIds.h"
+#include "TptFilters.h"
+
+namespace fourcolor
+{
+    class Crossover
+    {
+    public:
+        Crossover() = default;
+
+        static constexpr int controlInterval = 32;   // samples between coefficient updates
+        static constexpr float minRatio = 1.30f;     // enforced spacing between adjacent cuts
+
+        void prepare (double sampleRate, int maxBlockSize, int numChannels);
+        void reset();
+
+        //  Target frequencies; smoothed internally. Spacing is enforced here:
+        //  f2 is authoritative, f1 is pushed down and f3 pushed up if needed.
+        void setFrequencies (float f1, float f2, float f3) noexcept;
+
+        //  Splits `input` into four band buffers. Each destination must have at
+        //  least the input's channel count and length. Also writes the allpass
+        //  reference (what the four bands sum to) into `allpassRef` if non-null.
+        void process (const juce::AudioBuffer<float>& input,
+                      juce::AudioBuffer<float>* bands,           // array of numBands buffers
+                      juce::AudioBuffer<float>* allpassRef = nullptr) noexcept;
+
+        //  The frequencies actually in use after spacing enforcement + smoothing.
+        float getCurrentFrequency (int index) const noexcept { return currentHz[index]; }
+
+    private:
+        void updateCoefficients() noexcept;
+
+        struct ChannelState
+        {
+            //  f2 split: shared first stage + one second stage per side.
+            dsp::TptSvf mid1, midLow2, midHigh2;
+            //  f1 split of the low half.
+            dsp::TptSvf low1, lowLow2, lowHigh2;
+            //  f3 split of the high half.
+            dsp::TptSvf high1, highLow2, highHigh2;
+            //  Compensation allpasses.
+            dsp::TptSvf apLowSide;    // AP2 at f3, applied to bands 0 and 1 input
+            dsp::TptSvf apHighSide;   // AP2 at f1, applied to bands 2 and 3 input
+            //  Reference path: AP2(f1) AP2(f2) AP2(f3).
+            dsp::TptSvf refAp1, refAp2, refAp3;
+
+            void reset()
+            {
+                for (auto* f : { &mid1, &midLow2, &midHigh2, &low1, &lowLow2, &lowHigh2,
+                                 &high1, &highLow2, &highHigh2,
+                                 &apLowSide, &apHighSide, &refAp1, &refAp2, &refAp3 })
+                    f->reset();
+            }
+        };
+
+        double sampleRate = 44100.0;
+        int numChannels = 2;
+
+        float targetHz[3]  = { 120.0f, 700.0f, 4500.0f };
+        float currentHz[3] = { 120.0f, 700.0f, 4500.0f };
+        float smoothCoeff  = 0.0f;   // per-control-tick one-pole coefficient
+
+        ChannelState channels[2];
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Crossover)
+    };
+}
+
+
+===== FILE: Source/Dsp/Crossover.cpp =====
+
+#include "Crossover.h"
+
+namespace fourcolor
+{
+    namespace
+    {
+        constexpr float butterworthK = 1.41421356f;   // 1/Q for a Butterworth section
+    }
+
+    void Crossover::prepare (double newSampleRate, int, int channelCount)
+    {
+        sampleRate  = newSampleRate;
+        numChannels = juce::jlimit (1, 2, channelCount);
+
+        //  ~15 ms smoothing time constant, applied once per control tick.
+        const float tickRate = (float) sampleRate / (float) controlInterval;
+        smoothCoeff = 1.0f - std::exp (-1.0f / (0.015f * tickRate));
+
+        reset();
+    }
+
+    void Crossover::reset()
+    {
+        for (auto& ch : channels)
+            ch.reset();
+
+        for (int i = 0; i < 3; ++i)
+            currentHz[i] = targetHz[i];
+
+        updateCoefficients();
+    }
+
+    void Crossover::setFrequencies (float f1, float f2, float f3) noexcept
+    {
+        //  f2 is authoritative; push the outer cuts away if the user (or a
+        //  preset) tries to cross them.
+        f1 = juce::jmin (f1, f2 / minRatio);
+        f3 = juce::jmax (f3, f2 * minRatio);
+
+        targetHz[0] = f1;
+        targetHz[1] = f2;
+        targetHz[2] = f3;
+    }
+
+    void Crossover::updateCoefficients() noexcept
+    {
+        const float g1 = dsp::svfG (sampleRate, currentHz[0]);
+        const float g2 = dsp::svfG (sampleRate, currentHz[1]);
+        const float g3 = dsp::svfG (sampleRate, currentHz[2]);
+
+        for (int c = 0; c < numChannels; ++c)
+        {
+            auto& ch = channels[c];
+
+            ch.mid1.setCoefficients (g2, butterworthK);
+            ch.midLow2.setCoefficients (g2, butterworthK);
+            ch.midHigh2.setCoefficients (g2, butterworthK);
+
+            ch.low1.setCoefficients (g1, butterworthK);
+            ch.lowLow2.setCoefficients (g1, butterworthK);
+            ch.lowHigh2.setCoefficients (g1, butterworthK);
+
+            ch.high1.setCoefficients (g3, butterworthK);
+            ch.highLow2.setCoefficients (g3, butterworthK);
+            ch.highHigh2.setCoefficients (g3, butterworthK);
+
+            ch.apLowSide.setCoefficients (g3, butterworthK);
+            ch.apHighSide.setCoefficients (g1, butterworthK);
+
+            ch.refAp1.setCoefficients (g1, butterworthK);
+            ch.refAp2.setCoefficients (g2, butterworthK);
+            ch.refAp3.setCoefficients (g3, butterworthK);
+        }
+    }
+
+    void Crossover::process (const juce::AudioBuffer<float>& input,
+                             juce::AudioBuffer<float>* bands,
+                             juce::AudioBuffer<float>* allpassRef) noexcept
+    {
+        const int numSamples = input.getNumSamples();
+        const int chans      = juce::jmin (input.getNumChannels(), numChannels);
+
+        for (int start = 0; start < numSamples; start += controlInterval)
+        {
+            const int end = juce::jmin (start + controlInterval, numSamples);
+
+            //  Smooth the cutoffs once per control tick.
+            bool moved = false;
+            for (int i = 0; i < 3; ++i)
+            {
+                const float delta = targetHz[i] - currentHz[i];
+                if (std::abs (delta) > 1.0e-3f)
+                {
+                    currentHz[i] += smoothCoeff * delta;
+                    moved = true;
+                }
+            }
+            if (moved)
+                updateCoefficients();
+
+            for (int c = 0; c < chans; ++c)
+            {
+                auto& ch      = channels[c];
+                auto* in      = input.getReadPointer (c);
+                auto* b0      = bands[0].getWritePointer (c);
+                auto* b1      = bands[1].getWritePointer (c);
+                auto* b2      = bands[2].getWritePointer (c);
+                auto* b3      = bands[3].getWritePointer (c);
+                auto* ref     = allpassRef != nullptr ? allpassRef->getWritePointer (c) : nullptr;
+
+                for (int i = start; i < end; ++i)
+                {
+                    const float x = in[i];
+
+                    //  Split at f2. The first LR4 stage is shared: one SVF
+                    //  yields both the LP2 and HP2 of the same input.
+                    const auto m1  = ch.mid1.process (x);
+                    float lowHalf  = ch.midLow2.processLow (m1.low);
+                    float highHalf = ch.midHigh2.processHigh (m1.high);
+
+                    //  Sibling allpass compensation (see ARCHITECTURE.md).
+                    lowHalf  = ch.apLowSide.processAllpass (lowHalf);
+                    highHalf = ch.apHighSide.processAllpass (highHalf);
+
+                    //  Split the low half at f1.
+                    const auto l1 = ch.low1.process (lowHalf);
+                    b0[i] = ch.lowLow2.processLow (l1.low);
+                    b1[i] = ch.lowHigh2.processHigh (l1.high);
+
+                    //  Split the high half at f3.
+                    const auto h1 = ch.high1.process (highHalf);
+                    b2[i] = ch.highLow2.processLow (h1.low);
+                    b3[i] = ch.highHigh2.processHigh (h1.high);
+
+                    if (ref != nullptr)
+                        ref[i] = ch.refAp3.processAllpass (
+                                     ch.refAp2.processAllpass (
+                                         ch.refAp1.processAllpass (x)));
+                }
+            }
+        }
+    }
+}
+
+
+===== FILE: Source/Dsp/ColorEngine.h =====
+
+// The four colour engines. Deliberately four different STRUCTURES, not one
+// waveshaper with four constant sets:
+//
+//   WARM - memoryless rational soft saturator plus a slow "sag" envelope that
+//          eases the drive on sustained loud material, and a drive-dependent
+//          bias for even harmonics. Round, fat, gently compressing.
+//   IRON - saturator inside a feedback loop whose return passes a one-pole
+//          "core loss" filter: the transfer depends on what just happened,
+//          which is the transformer-ish density. Level-dependent even term.
+//   BITE - asymmetric exponential diode pair with internal pre-emphasis /
+//          de-emphasis around the clipper. Fast, forward, upper-mid grit.
+//   FUZZ - partial rectification into a wavefolder into a clip, with an
+//          envelope gate that sputters on decays. The broken one.
+//
+// Engines run at the OVERSAMPLED rate inside NonlinearStage; every internal
+// time constant is derived from the rate passed to prepare().
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+
+#include "../Core/ParameterIds.h"
+#include "TptFilters.h"
+
+namespace fourcolor
+{
+    class ColorEngine
+    {
+    public:
+        virtual ~ColorEngine() = default;
+
+        void prepare (double sampleRate, int numChannels);
+        void reset();
+
+        //  drivePercent 0..100. Cheap; called once per block.
+        void setDrive (float drivePercent) noexcept;
+
+        //  Per-band Behavior modulation multiplies the effective pre-gain.
+        //  1.0 = neutral; bounded to about +/-6 dB by the caller.
+        virtual void processBlock (float* data, int numSamples, int channel,
+                                   const float* preGainMod = nullptr) noexcept = 0;
+
+        //  Static make-up so Drive changes colour more than loudness. Derived
+        //  from each engine's memoryless curve at a -12 dBFS reference input.
+        float getCompensationGain() const noexcept { return compensation; }
+
+        virtual ColorType type() const noexcept = 0;
+
+    protected:
+        virtual void prepareInternals() = 0;
+        virtual void resetInternals() = 0;
+        virtual void driveChanged() noexcept {}
+
+        //  The engine's memoryless transfer approximation, used only to compute
+        //  static gain compensation.
+        virtual float staticShape (float u) const noexcept = 0;
+
+        //  Maximum pre-gain in dB at drive = 100.
+        virtual float maxDriveDb() const noexcept = 0;
+
+        double rate = 48000.0;
+        int channelCount = 2;
+        float d01 = 0.25f;
+        float preGain = 1.0f;
+        float compensation = 1.0f;
+
+        static constexpr int maxChannels = 2;
+
+    private:
+        void updateCompensation() noexcept;
+    };
+
+    // --- WARM -----------------------------------------------------------------
+    class WarmEngine : public ColorEngine
+    {
+    public:
+        ColorType type() const noexcept override { return ColorType::warm; }
+        void processBlock (float*, int, int, const float*) noexcept override;
+
+    protected:
+        void prepareInternals() override;
+        void resetInternals() override;
+        void driveChanged() noexcept override;
+        float staticShape (float u) const noexcept override;
+        float maxDriveDb() const noexcept override { return 24.0f; }
+
+    private:
+        float bias = 0.0f, biasOut = 0.0f, sagDepth = 0.0f;
+        struct Ch { dsp::OnePole sagEnv; dsp::DcBlocker dc; } ch[maxChannels];
+    };
+
+    // --- IRON -----------------------------------------------------------------
+    class IronEngine : public ColorEngine
+    {
+    public:
+        ColorType type() const noexcept override { return ColorType::iron; }
+        void processBlock (float*, int, int, const float*) noexcept override;
+
+    protected:
+        void prepareInternals() override;
+        void resetInternals() override;
+        void driveChanged() noexcept override;
+        float staticShape (float u) const noexcept override;
+        float maxDriveDb() const noexcept override { return 27.0f; }
+
+    private:
+        float fbAmount = 0.0f, evenAmount = 0.0f;
+        struct Ch { dsp::OnePole coreLoss; float lastOut = 0.0f; dsp::DcBlocker dc; } ch[maxChannels];
+    };
+
+    // --- BITE -----------------------------------------------------------------
+    class BiteEngine : public ColorEngine
+    {
+    public:
+        ColorType type() const noexcept override { return ColorType::bite; }
+        void processBlock (float*, int, int, const float*) noexcept override;
+
+    protected:
+        void prepareInternals() override;
+        void resetInternals() override;
+        void driveChanged() noexcept override;
+        float staticShape (float u) const noexcept override;
+        float maxDriveDb() const noexcept override { return 30.0f; }
+
+    private:
+        float emphasis = 0.6f;
+        struct Ch { dsp::OnePole preHp, postHp; dsp::DcBlocker dc; } ch[maxChannels];
+    };
+
+    // --- FUZZ -----------------------------------------------------------------
+    class FuzzEngine : public ColorEngine
+    {
+    public:
+        ColorType type() const noexcept override { return ColorType::fuzz; }
+        void processBlock (float*, int, int, const float*) noexcept override;
+
+    protected:
+        void prepareInternals() override;
+        void resetInternals() override;
+        void driveChanged() noexcept override;
+        float staticShape (float u) const noexcept override;
+        float maxDriveDb() const noexcept override { return 36.0f; }
+
+    private:
+        float rectify = 0.0f, gateThreshold = 0.002f;
+        float envAttack = 0.0f, envRelease = 0.0f;
+        struct Ch { float env = 0.0f; dsp::DcBlocker dc; } ch[maxChannels];
+    };
+
+    std::unique_ptr<ColorEngine> createColorEngine (ColorType type);
+}
+
+
+===== FILE: Source/Dsp/ColorEngine.cpp =====
+
+#include "ColorEngine.h"
+
+namespace fourcolor
+{
+    // --- base -----------------------------------------------------------------
+    void ColorEngine::prepare (double sampleRate, int numChannels)
+    {
+        rate = sampleRate;
+        channelCount = juce::jlimit (1, maxChannels, numChannels);
+        prepareInternals();
+        setDrive (d01 * 100.0f);
+        reset();
+    }
+
+    void ColorEngine::reset()
+    {
+        resetInternals();
+    }
+
+    void ColorEngine::setDrive (float drivePercent) noexcept
+    {
+        d01 = juce::jlimit (0.0f, 1.0f, drivePercent * 0.01f);
+        preGain = juce::Decibels::decibelsToGain (d01 * maxDriveDb());
+        driveChanged();
+        updateCompensation();
+    }
+
+    void ColorEngine::updateCompensation() noexcept
+    {
+        //  Match the level of a -12 dBFS sine through the memoryless curve.
+        //  RMS-ish: sample the curve at a few points of the half cycle.
+        constexpr float ref = 0.25f;
+        float inPower = 0.0f, outPower = 0.0f;
+
+        for (int i = 0; i < 16; ++i)
+        {
+            const float phase = (i + 0.5f) * (juce::MathConstants<float>::pi / 16.0f);
+            const float x = ref * std::sin (phase);
+            const float y = staticShape (x * preGain);
+            inPower  += x * x;
+            outPower += y * y;
+        }
+
+        compensation = (outPower > 1.0e-12f) ? std::sqrt (inPower / outPower) : 1.0f;
+        //  Never boost by more than 12 dB or cut by more than 24 dB.
+        compensation = juce::jlimit (0.0631f, 3.98f, compensation);
+    }
+
+    // --- WARM -----------------------------------------------------------------
+    namespace
+    {
+        inline float rationalSoft (float u) noexcept { return u / (1.0f + std::abs (u)); }
+    }
+
+    void WarmEngine::prepareInternals()
+    {
+        for (auto& c : ch)
+        {
+            //  Slow sag: reacts over ~120 ms, recovers over the same one-pole.
+            c.sagEnv.setCutoff (rate, 1.3f);
+            c.dc.prepare (rate);
+        }
+    }
+
+    void WarmEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.sagEnv.reset(); c.dc.reset(); }
+    }
+
+    void WarmEngine::driveChanged() noexcept
+    {
+        bias     = 0.12f * d01;
+        biasOut  = rationalSoft (bias);
+        sagDepth = 0.35f * d01;
+    }
+
+    float WarmEngine::staticShape (float u) const noexcept
+    {
+        return rationalSoft (u + bias) - biasOut;
+    }
+
+    void WarmEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+
+            //  Sag eases the drive as the (driven) level stays high, which is
+            //  the "program-dependent" part of the warmth.
+            const float level = c.sagEnv.process (std::abs (data[i] * g));
+            const float sag   = 1.0f - sagDepth * juce::jmin (1.0f, level);
+
+            const float u = data[i] * g * sag + bias;
+            data[i] = c.dc.process (rationalSoft (u) - biasOut);
+        }
+    }
+
+    // --- IRON -----------------------------------------------------------------
+    void IronEngine::prepareInternals()
+    {
+        for (auto& c : ch)
+        {
+            c.coreLoss.setCutoff (rate, 280.0f);   // the loop returns only lows: density
+            c.dc.prepare (rate);
+        }
+    }
+
+    void IronEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.coreLoss.reset(); c.lastOut = 0.0f; c.dc.reset(); }
+    }
+
+    void IronEngine::driveChanged() noexcept
+    {
+        fbAmount   = 0.45f * d01;
+        evenAmount = 0.10f + 0.15f * d01;
+    }
+
+    float IronEngine::staticShape (float u) const noexcept
+    {
+        //  Memoryless approximation of the loop for gain compensation only.
+        const float v = u + evenAmount * u * u / (1.0f + std::abs (u));
+        return std::tanh (v);
+    }
+
+    void IronEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+
+            //  Feedback around the saturator: the low-passed previous output is
+            //  subtracted at the input, so the curve's operating point depends
+            //  on recent history. Loop is stable: tanh is bounded, |fb| < 0.5.
+            const float memory = c.coreLoss.process (c.lastOut);
+            const float u = data[i] * g - fbAmount * memory;
+            const float v = u + evenAmount * u * u / (1.0f + std::abs (u));
+            const float y = std::tanh (v);
+
+            c.lastOut = y;
+            data[i] = c.dc.process (y);
+        }
+    }
+
+    // --- BITE -----------------------------------------------------------------
+    void BiteEngine::prepareInternals()
+    {
+        for (auto& c : ch)
+        {
+            c.preHp.setCutoff (rate, 1800.0f);
+            c.postHp.setCutoff (rate, 1800.0f);
+            c.dc.prepare (rate);
+        }
+    }
+
+    void BiteEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.preHp.reset(); c.postHp.reset(); c.dc.reset(); }
+    }
+
+    void BiteEngine::driveChanged() noexcept
+    {
+        emphasis = 0.6f + 1.2f * d01;
+    }
+
+    float BiteEngine::staticShape (float u) const noexcept
+    {
+        //  Asymmetric exponential diode pair with a deliberately short knee
+        //  (hardness 2.2): strong odd AND even content that arrives quickly,
+        //  with clear upper partials - the defining difference from WARM.
+        constexpr float h = 2.5f;
+
+        if (u >= 0.0f)
+            return (1.0f - std::exp (-h * u)) / h;
+
+        return -(1.0f - std::exp (1.3f * h * u)) / (1.3f * h);
+    }
+
+    void BiteEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+
+        //  De-emphasis takes back only half the boost: the rest is the
+        //  engine's forward, present character. Taking back 100% was measured
+        //  to leave BITE with FEWER upper harmonics than WARM.
+        const float deemph = 0.5f * emphasis / (1.0f + emphasis);
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+            float u = data[i] * g;
+
+            //  Internal pre-emphasis: push the upper mids INTO the clipper...
+            u += emphasis * c.preHp.processHigh (u);
+
+            float y = staticShape (u);
+
+            //  ...and take the same amount back out afterwards, so the result
+            //  is "distorted brighter" rather than just "brighter".
+            y -= deemph * c.postHp.processHigh (y);
+
+            data[i] = c.dc.process (y);
+        }
+    }
+
+    // --- FUZZ -----------------------------------------------------------------
+    void FuzzEngine::prepareInternals()
+    {
+        //  Fast gate envelope: ~0.5 ms attack, ~30 ms release.
+        envAttack  = 1.0f - std::exp (-1.0f / (0.0005f * (float) rate));
+        envRelease = 1.0f - std::exp (-1.0f / (0.030f * (float) rate));
+
+        for (auto& c : ch)
+            c.dc.prepare (rate);
+    }
+
+    void FuzzEngine::resetInternals()
+    {
+        for (auto& c : ch) { c.env = 0.0f; c.dc.reset(); }
+    }
+
+    void FuzzEngine::driveChanged() noexcept
+    {
+        rectify       = 0.35f * d01;
+        gateThreshold = 0.002f + 0.018f * d01;   // more drive, more sputter
+    }
+
+    namespace
+    {
+        inline float foldOnce (float u) noexcept
+        {
+            if (u >  1.0f) return  2.0f - u;
+            if (u < -1.0f) return -2.0f - u;
+            return u;
+        }
+    }
+
+    float FuzzEngine::staticShape (float u) const noexcept
+    {
+        float v = (1.0f - rectify) * u + rectify * std::abs (u);
+        v = foldOnce (foldOnce (v));
+        return juce::jlimit (-1.0f, 1.0f, v);
+    }
+
+    void FuzzEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    {
+        auto& c = ch[channel];
+        const float t2 = gateThreshold * gateThreshold;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float x = data[i];
+            const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
+
+            //  Gate envelope follows the INPUT, so quiet decays collapse in
+            //  that broken, sputtering way instead of sustaining politely.
+            const float mag = std::abs (x);
+            c.env += (mag > c.env ? envAttack : envRelease) * (mag - c.env);
+            const float e2 = c.env * c.env;
+            const float gate = e2 / (e2 + t2);
+
+            //  Partial rectification (even harmonics + the ragged texture),
+            //  then a double fold, then a clamp.
+            float v = (1.0f - rectify) * (x * g) + rectify * std::abs (x * g);
+            v = foldOnce (foldOnce (v));
+            v = juce::jlimit (-1.0f, 1.0f, v);
+
+            data[i] = c.dc.process (v * gate);
+        }
+    }
+
+    // --- factory --------------------------------------------------------------
+    std::unique_ptr<ColorEngine> createColorEngine (ColorType type)
+    {
+        switch (type)
+        {
+            case ColorType::warm: return std::make_unique<WarmEngine>();
+            case ColorType::iron: return std::make_unique<IronEngine>();
+            case ColorType::bite: return std::make_unique<BiteEngine>();
+            case ColorType::fuzz: return std::make_unique<FuzzEngine>();
+        }
+        return std::make_unique<WarmEngine>();
+    }
+}
+
+
+===== FILE: Source/Dsp/NonlinearStage.h =====
+
+// One band's oversampled nonlinear section: four always-prepared colour
+// engines, four pre-allocated oversamplers (1x/2x/4x/8x), a 15 ms equal-power
+// crossfade on colour changes, and linear upsampling of the Behavior
+// modulation signal to the oversampled rate.
+//
+// Everything is allocated in prepare(); quality and colour switches on the
+// audio thread only swap indices and reset pre-existing state.
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_dsp/juce_dsp.h>
+
+#include "ColorEngine.h"
+
+namespace fourcolor
+{
+    class NonlinearStage
+    {
+    public:
+        NonlinearStage() = default;
+
+        void prepare (double baseSampleRate, int maxBlockSize, int numChannels);
+        void reset();
+
+        //  Audio-thread safe: switches between pre-allocated oversamplers at a
+        //  block boundary. Returns true if the factor actually changed (the
+        //  caller must then re-align delays and re-report latency).
+        bool setQuality (Quality q) noexcept;
+
+        //  Audio-thread safe: starts the colour crossfade if the type changed.
+        void setColor (ColorType type) noexcept;
+
+        void setDrive (float drivePercent) noexcept;
+
+        //  In-place. `behaviorMod`, if given, is a base-rate per-sample linear
+        //  gain factor (around 1.0) applied to the engine pre-gain.
+        void process (juce::AudioBuffer<float>& buffer,
+                      const float* behaviorMod[2] = nullptr) noexcept;
+
+        //  Wet-path latency at the base rate for the CURRENT quality (fractional).
+        float getLatencySamples() const noexcept;
+
+        //  Worst-case latency across all qualities, for sizing alignment delays.
+        float getMaxLatencySamples() const noexcept { return maxLatency; }
+
+        //  Applied internally by process(); exposed for the tests.
+        float getCompensationGain() const noexcept
+        {
+            return engines[(size_t) activeColor]->getCompensationGain();
+        }
+
+        ColorType getColor() const noexcept { return activeColor; }
+
+    private:
+        double baseRate = 48000.0;
+        int maxBlock = 0;
+        int channels = 2;
+        float maxLatency = 0.0f;
+
+        std::unique_ptr<ColorEngine> engines[4];         // per ColorType, at 8x readiness
+        std::unique_ptr<juce::dsp::Oversampling<float>> oversamplers[4];   // per Quality
+        int activeQuality = (int) Quality::high;
+
+        ColorType activeColor = ColorType::warm;
+        ColorType fadingFrom  = ColorType::warm;
+        int fadeSamplesLeft = 0;      // at base rate
+        int fadeLengthSamples = 1;
+
+        juce::AudioBuffer<float> fadeScratch;    // oversampled copy for the outgoing colour
+        juce::AudioBuffer<float> modScratch;     // oversampled behavior modulation
+        float drivePercent = 25.0f;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NonlinearStage)
+    };
+}
+
+
+===== FILE: Source/Dsp/NonlinearStage.cpp =====
+
+#include "NonlinearStage.h"
+
+namespace fourcolor
+{
+    void NonlinearStage::prepare (double newBaseRate, int maxBlockSize, int numChannels)
+    {
+        baseRate = newBaseRate;
+        maxBlock = maxBlockSize;
+        channels = juce::jlimit (1, 2, numChannels);
+
+        //  All four oversamplers exist up front so a Quality change on the
+        //  audio thread never allocates.
+        maxLatency = 0.0f;
+        for (int q = 0; q < 4; ++q)
+        {
+            //  Quality index q doubles as the oversampling log2: 0..3 -> 1x..8x.
+            oversamplers[q] = std::make_unique<juce::dsp::Oversampling<float>> (
+                (size_t) channels, (size_t) q,
+                juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple,
+                true /* isMaxQuality */);
+            oversamplers[q]->initProcessing ((size_t) maxBlock);
+            maxLatency = juce::jmax (maxLatency, (float) oversamplers[q]->getLatencyInSamples());
+        }
+
+        //  Engines are prepared for the highest oversampled rate they might see;
+        //  time constants are recomputed on every quality switch below, so
+        //  prepare each engine for the CURRENT factor at switch time instead.
+        for (int e = 0; e < 4; ++e)
+        {
+            engines[e] = createColorEngine ((ColorType) e);
+            engines[e]->prepare (baseRate * oversamplers[activeQuality]->getOversamplingFactor(),
+                                 channels);
+        }
+
+        //  Both scratch buffers live in the oversampled domain: 8x worst case.
+        fadeScratch.setSize (channels, maxBlock * 8);
+        modScratch.setSize (channels, maxBlock * 8);
+
+        fadeLengthSamples = juce::jmax (1, (int) (0.015 * baseRate));
+        fadeSamplesLeft = 0;
+
+        setDrive (drivePercent);
+        reset();
+    }
+
+    void NonlinearStage::reset()
+    {
+        for (auto& os : oversamplers)
+            if (os != nullptr)
+                os->reset();
+
+        for (auto& e : engines)
+            if (e != nullptr)
+                e->reset();
+
+        fadeSamplesLeft = 0;
+    }
+
+    bool NonlinearStage::setQuality (Quality q) noexcept
+    {
+        const int index = juce::jlimit (0, 3, (int) q);
+        if (index == activeQuality)
+            return false;
+
+        activeQuality = index;
+        oversamplers[activeQuality]->reset();
+
+        //  Re-derive engine time constants for the new engine-side rate.
+        //  ColorEngine::prepare only computes coefficients - no allocation.
+        const double engineRate = baseRate * oversamplers[activeQuality]->getOversamplingFactor();
+        for (auto& e : engines)
+            e->prepare (engineRate, channels);
+
+        return true;
+    }
+
+    void NonlinearStage::setColor (ColorType type) noexcept
+    {
+        if (type == activeColor)
+            return;
+
+        fadingFrom = activeColor;
+        activeColor = type;
+        fadeSamplesLeft = fadeLengthSamples;
+        engines[(size_t) activeColor]->setDrive (drivePercent);
+    }
+
+    void NonlinearStage::setDrive (float newDrivePercent) noexcept
+    {
+        drivePercent = newDrivePercent;
+        for (auto& e : engines)
+            if (e != nullptr)
+                e->setDrive (drivePercent);
+    }
+
+    float NonlinearStage::getLatencySamples() const noexcept
+    {
+        return (float) oversamplers[activeQuality]->getLatencyInSamples();
+    }
+
+    void NonlinearStage::process (juce::AudioBuffer<float>& buffer,
+                                  const float* behaviorMod[2]) noexcept
+    {
+        const int n = buffer.getNumSamples();
+        if (n == 0)
+            return;
+
+        auto& os = *oversamplers[activeQuality];
+        const int factor = (int) os.getOversamplingFactor();
+
+        //  Upsample ONCE; engines and the colour crossfade all run in the
+        //  oversampled domain, so both fade legs share the same latency and
+        //  the same anti-aliasing.
+        juce::dsp::AudioBlock<float> baseBlock (buffer.getArrayOfWritePointers(),
+                                                (size_t) buffer.getNumChannels(), (size_t) n);
+        auto osBlock = os.processSamplesUp (baseBlock);
+        const int osSamples = (int) osBlock.getNumSamples();
+        const int chans = (int) osBlock.getNumChannels();
+
+        //  Upsample the (smooth, low-frequency) Behavior modulation linearly.
+        const float* mod[2] = { nullptr, nullptr };
+        if (behaviorMod != nullptr)
+        {
+            for (int c = 0; c < chans; ++c)
+            {
+                if (behaviorMod[c] == nullptr)
+                    continue;
+
+                auto* m = modScratch.getWritePointer (c);
+                const float* src = behaviorMod[c];
+
+                for (int i = 0; i < osSamples; ++i)
+                {
+                    const float pos = (float) i / (float) factor;
+                    const int i0 = juce::jmin ((int) pos, n - 1);
+                    const int i1 = juce::jmin (i0 + 1, n - 1);
+                    const float frac = pos - (float) i0;
+                    m[i] = src[i0] + frac * (src[i1] - src[i0]);
+                }
+                mod[c] = m;
+            }
+        }
+
+        auto& incoming = *engines[(size_t) activeColor];
+        const float compIn = incoming.getCompensationGain();
+
+        if (fadeSamplesLeft <= 0)
+        {
+            for (int c = 0; c < chans; ++c)
+            {
+                auto* d = osBlock.getChannelPointer ((size_t) c);
+                incoming.processBlock (d, osSamples, c, mod[c]);
+
+                //  Static make-up so Drive changes colour more than loudness.
+                juce::FloatVectorOperations::multiply (d, compIn, osSamples);
+            }
+        }
+        else
+        {
+            //  Equal-power crossfade in the oversampled domain: outgoing engine
+            //  on a copy, incoming on the block, blended per sample.
+            auto& outgoing = *engines[(size_t) fadingFrom];
+            const float compOut = outgoing.getCompensationGain();
+            const int fadeLenOs = fadeLengthSamples * factor;
+            const int leftAtStart = fadeSamplesLeft * factor;
+
+            for (int c = 0; c < chans; ++c)
+            {
+                auto* d = osBlock.getChannelPointer ((size_t) c);
+                auto* s = fadeScratch.getWritePointer (c);
+                juce::FloatVectorOperations::copy (s, d, osSamples);
+
+                incoming.processBlock (d, osSamples, c, mod[c]);
+                outgoing.processBlock (s, osSamples, c, mod[c]);
+
+                int left = leftAtStart;
+                for (int i = 0; i < osSamples; ++i)
+                {
+                    if (left > 0)
+                    {
+                        const float t = 1.0f - (float) left / (float) fadeLenOs;   // 0 -> 1
+                        const float a = std::sin (t * juce::MathConstants<float>::halfPi);
+                        const float b = std::cos (t * juce::MathConstants<float>::halfPi);
+                        d[i] = a * d[i] * compIn + b * s[i] * compOut;
+                        --left;
+                    }
+                    else
+                    {
+                        d[i] *= compIn;
+                    }
+                }
+            }
+
+            fadeSamplesLeft = juce::jmax (0, fadeSamplesLeft - n);
+        }
+
+        os.processSamplesDown (baseBlock);
+    }
+}
+
+
+===== FILE: Source/Dsp/BehaviorDetector.h =====
+
+// The BODY <-> ATTACK detector. Two envelope followers on the same stereo-
+// linked signal - one fast, one slow - and a bounded transient measure derived
+// from their difference. The measure modulates the colour engine's pre-gain:
+//
+//   ATTACK (+): transients are driven HARDER   (hit gets bite, tail stays calm)
+//   BODY   (-): transients are driven SOFTER   (hit passes clean, body saturates)
+//
+// Time constants scale per band: a "fast" 1 ms follower on a 40 Hz band would
+// just track the waveform, so the low bands use slower clocks than the top.
+// Modulation depth is bounded to +/-6 dB and smoothed, which is what keeps
+// this from becoming a pumping compressor.
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+
+#include "../Core/ParameterIds.h"
+
+namespace fourcolor
+{
+    class BehaviorDetector
+    {
+    public:
+        BehaviorDetector() = default;
+
+        void prepare (double sampleRate, int bandIndex);
+        void reset();
+
+        //  behavior in [-1, 1]; 0 disables (writeModulation then writes 1.0).
+        void setBehavior (float behavior) noexcept { amount = juce::jlimit (-1.0f, 1.0f, behavior); }
+
+        //  Reads the (pre-processing) band buffer, writes a per-sample linear
+        //  pre-gain factor into `modOut` (length n). Stereo-linked: one curve
+        //  for both channels.
+        void writeModulation (const juce::AudioBuffer<float>& bandInput,
+                              float* modOut, int n) noexcept;
+
+        bool isActive() const noexcept { return std::abs (amount) > 1.0e-3f; }
+
+    private:
+        float amount = 0.0f;
+
+        //  One-pole coefficients (attack/release pairs) for the two followers
+        //  and the modulation smoother.
+        float fastAtk = 0.0f, fastRel = 0.0f;
+        float slowAtk = 0.0f, slowRel = 0.0f;
+        float modSmooth = 0.0f;
+
+        float fastEnv = 0.0f, slowEnv = 0.0f, modState = 1.0f;
+
+        //  +/-9 dB at full deflection: +/-6 dB was measured to move the kick's
+        //  attack-crunch spread only 1.3 dB, too subtle for the product's
+        //  headline control. Pumping stays bounded (asserted at < 1 dB on
+        //  sustained material).
+        static constexpr float maxModDb = 9.0f;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BehaviorDetector)
+    };
+}
+
+
+===== FILE: Source/Dsp/BehaviorDetector.cpp =====
+
+#include "BehaviorDetector.h"
+
+namespace fourcolor
+{
+    namespace
+    {
+        inline float onePoleCoeff (double sampleRate, float seconds) noexcept
+        {
+            return 1.0f - std::exp (-1.0f / (seconds * (float) sampleRate));
+        }
+    }
+
+    void BehaviorDetector::prepare (double sampleRate, int bandIndex)
+    {
+        //  Per-band detector clocks. LOW must be slow enough not to track the
+        //  waveform of a 40 Hz fundamental (25 ms period); HIGH can be fast.
+        //                              LOW    LMID   HMID   HIGH
+        constexpr float fastAtkMs[] = { 6.0f,  3.0f,  1.5f,  0.8f };
+        constexpr float fastRelMs[] = { 60.0f, 40.0f, 25.0f, 18.0f };
+        constexpr float slowAtkMs[] = { 80.0f, 60.0f, 45.0f, 35.0f };
+        constexpr float slowRelMs[] = { 200.0f, 150.0f, 120.0f, 100.0f };
+
+        const int b = juce::jlimit (0, 3, bandIndex);
+        fastAtk = onePoleCoeff (sampleRate, fastAtkMs[b] * 0.001f);
+        fastRel = onePoleCoeff (sampleRate, fastRelMs[b] * 0.001f);
+        slowAtk = onePoleCoeff (sampleRate, slowAtkMs[b] * 0.001f);
+        slowRel = onePoleCoeff (sampleRate, slowRelMs[b] * 0.001f);
+
+        //  Modulation smoothing: ~3 ms, fast enough to catch a transient's
+        //  head, slow enough to be click-free.
+        modSmooth = onePoleCoeff (sampleRate, 0.003f);
+
+        reset();
+    }
+
+    void BehaviorDetector::reset()
+    {
+        fastEnv = slowEnv = 0.0f;
+        modState = 1.0f;
+    }
+
+    void BehaviorDetector::writeModulation (const juce::AudioBuffer<float>& bandInput,
+                                            float* modOut, int n) noexcept
+    {
+        if (! isActive())
+        {
+            juce::FloatVectorOperations::fill (modOut, 1.0f, n);
+            modState = 1.0f;
+            return;
+        }
+
+        const int chans = bandInput.getNumChannels();
+        const float* l = bandInput.getReadPointer (0);
+        const float* r = chans > 1 ? bandInput.getReadPointer (1) : nullptr;
+
+        //  +/-6 dB at full transient measure and full amount.
+        const float depthDb = maxModDb * amount;
+
+        for (int i = 0; i < n; ++i)
+        {
+            //  Stereo-linked rectifier: the louder channel drives both, so the
+            //  image never leans.
+            const float mag = r != nullptr ? juce::jmax (std::abs (l[i]), std::abs (r[i]))
+                                           : std::abs (l[i]);
+
+            fastEnv += (mag > fastEnv ? fastAtk : fastRel) * (mag - fastEnv);
+            slowEnv += (mag > slowEnv ? slowAtk : slowRel) * (mag - slowEnv);
+
+            //  Bounded transient measure: 0 in steady state, -> 1 when the fast
+            //  follower runs ahead of the slow one (i.e. on attacks).
+            const float transient = (fastEnv - slowEnv) / (fastEnv + slowEnv + 1.0e-6f);
+            const float t = juce::jlimit (0.0f, 1.0f, transient * 2.0f);
+
+            //  dB-linear modulation of the pre-gain, then one-pole smoothing.
+            const float targetDb = depthDb * t;
+            const float target = std::exp (targetDb * 0.115129254f);   // ln(10)/20
+            modState += modSmooth * (target - modState);
+            modOut[i] = modState;
+        }
+    }
+}
+
+
+===== FILE: Source/Dsp/ToneStage.h =====
+
+// Per-band DARK <-> BRIGHT control. Not a post-EQ: the tilt is split equally
+// between a pre-emphasis half (which changes WHAT the shaper distorts) and a
+// post half (which finishes the tonal move and reins in harsh top on high
+// drive). Total reach is +/-9 dB of high-shelf at the band's centre, so a
+// band's tone cannot dump energy far outside its own region.
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+
+#include "TptFilters.h"
+
+namespace fourcolor
+{
+    class ToneStage
+    {
+    public:
+        ToneStage() = default;
+
+        void prepare (double sampleRate, int numChannels);
+        void reset();
+
+        //  tone in [-1, 1], centreHz = the band's geometric centre. Cheap.
+        void setTone (float tone, float centreHz) noexcept;
+
+        void processPre  (juce::AudioBuffer<float>& buffer) noexcept;
+        void processPost (juce::AudioBuffer<float>& buffer) noexcept;
+
+    private:
+        void apply (juce::AudioBuffer<float>& buffer, dsp::OnePole* filters, float amount) noexcept;
+
+        double rate = 48000.0;
+        int channels = 2;
+        float amountPre = 0.0f, amountPost = 0.0f;
+        float currentCentre = 0.0f;
+
+        dsp::OnePole preHp[2], postHp[2];
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ToneStage)
+    };
+}
+
+
+===== FILE: Source/Dsp/ToneStage.cpp =====
+
+#include "ToneStage.h"
+
+namespace fourcolor
+{
+    void ToneStage::prepare (double sampleRate, int numChannels)
+    {
+        rate = sampleRate;
+        channels = juce::jlimit (1, 2, numChannels);
+        currentCentre = 0.0f;
+        reset();
+    }
+
+    void ToneStage::reset()
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            preHp[c].reset();
+            postHp[c].reset();
+        }
+    }
+
+    void ToneStage::setTone (float tone, float centreHz) noexcept
+    {
+        tone = juce::jlimit (-1.0f, 1.0f, tone);
+
+        //  +/-9 dB net tilt, split as two equal sqrt halves around the shaper.
+        const float netGain  = std::pow (10.0f, tone * 9.0f / 20.0f);
+        const float half     = std::sqrt (netGain) - 1.0f;
+
+        amountPre  = half;
+        amountPost = half;
+
+        //  Retune the shelf corner only when the centre actually moves
+        //  (crossover automation); a 5% threshold avoids per-block tan().
+        if (std::abs (centreHz - currentCentre) > 0.05f * juce::jmax (1.0f, currentCentre))
+        {
+            currentCentre = centreHz;
+            for (int c = 0; c < 2; ++c)
+            {
+                preHp[c].setCutoff (rate, centreHz);
+                postHp[c].setCutoff (rate, centreHz);
+            }
+        }
+    }
+
+    void ToneStage::apply (juce::AudioBuffer<float>& buffer, dsp::OnePole* filters, float amount) noexcept
+    {
+        //  y = x + amount * highpass(x): a first-order high shelf of gain
+        //  (1 + amount) above the corner.
+        const int n = buffer.getNumSamples();
+
+        for (int c = 0; c < juce::jmin (buffer.getNumChannels(), channels); ++c)
+        {
+            auto* d = buffer.getWritePointer (c);
+            auto& f = filters[c];
+
+            for (int i = 0; i < n; ++i)
+                d[i] += amount * f.processHigh (d[i]);
+        }
+    }
+
+    void ToneStage::processPre (juce::AudioBuffer<float>& buffer) noexcept
+    {
+        //  The filter must keep running even at amount 0 so engaging the tone
+        //  is stateless-transition free.
+        apply (buffer, preHp, amountPre);
+    }
+
+    void ToneStage::processPost (juce::AudioBuffer<float>& buffer) noexcept
+    {
+        apply (buffer, postHp, amountPost);
+    }
+}
+
+
+===== FILE: Source/Dsp/HarmonicSpace.h =====
+
+// HARMONIC SPACE - not a reverb. The engine isolates what the saturation
+// CREATED and diffuses only that:
+//
+//   residual = wet - g0*clean - g1*HP(clean)
+//
+// where (g0, g1) is a slow running least-squares fit over a two-function
+// basis: the aligned clean band and its first-order high-pass. A single
+// scalar was measured leaving ~37% of the SOURCE in the "residual", because
+// the engines' small-signal responses are not flat (IRON's feedback loop and
+// BITE's partial de-emphasis are first-order shelves); the high-pass basis
+// term absorbs exactly that class of linear colouration, so what remains is
+// the genuinely nonlinear part.
+//
+// The residual feeds a short micro-diffusion (two allpasses into a damped
+// comb, no tail), with per-band time ranges - LOW breathes at 13-29 ms,
+// HIGH sits tight at 3-7 ms. The LOW band's diffusion is strictly mono;
+// the other bands decorrelate L/R by detuned delay lengths.
+//
+// At amount 0 the whole engine is skipped by the caller (isActive()).
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+
+#include "../Core/ParameterIds.h"
+#include "TptFilters.h"
+
+namespace fourcolor
+{
+    class HarmonicSpace
+    {
+    public:
+        HarmonicSpace() = default;
+
+        void prepare (double sampleRate, int maxBlockSize, int numChannels, int bandIndex);
+        void reset();
+
+        void setAmount (float amount01) noexcept;
+        bool isActive() const noexcept { return targetAmount > 1.0e-3f || currentAmount > 1.0e-3f; }
+
+        //  Reads the processed band (`wet`) and the aligned clean band, ADDS
+        //  the diffused residual into `wet` in place.
+        void process (juce::AudioBuffer<float>& wet,
+                      const juce::AudioBuffer<float>& clean, int n) noexcept;
+
+    private:
+        struct Diffuser
+        {
+            std::vector<float> ap1, ap2, comb;
+            int ap1Len = 1, ap2Len = 1, combLen = 1;
+            int ap1Pos = 0, ap2Pos = 0, combPos = 0;
+            dsp::OnePole damping;
+
+            void resize (double sr, float ap1Ms, float ap2Ms, float combMs);
+            void clear();
+
+            float process (float x, float feedback) noexcept;
+        };
+
+        double rate = 48000.0;
+        int channels = 2;
+        int band = 0;
+
+        float targetAmount = 0.0f, currentAmount = 0.0f, amountCoeff = 0.0f;
+
+        //  Running two-basis least-squares accumulators, per channel:
+        //  s00 = <c,c>, s11 = <h,h>, s01 = <c,h>, r0 = <w,c>, r1 = <w,h>
+        //  with c = clean, h = HP(clean), w = wet.
+        struct FitState { float s00 = 0, s11 = 0, s01 = 0, r0 = 0, r1 = 0; };
+        FitState fit[2];
+        float accCoeff = 0.0f;
+
+        dsp::OnePole basisHp[2];      // the high-pass basis filter
+        dsp::DcBlocker residualHp[2];
+        Diffuser diffuser[2];
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HarmonicSpace)
+    };
+}
+
+
+===== FILE: Source/Dsp/HarmonicSpace.cpp =====
+
+#include "HarmonicSpace.h"
+
+namespace fourcolor
+{
+    void HarmonicSpace::Diffuser::resize (double sr, float ap1Ms, float ap2Ms, float combMs)
+    {
+        auto samplesFor = [sr] (float ms) {
+            return juce::jmax (1, (int) std::round (ms * 0.001 * sr));
+        };
+
+        ap1Len  = samplesFor (ap1Ms);
+        ap2Len  = samplesFor (ap2Ms);
+        combLen = samplesFor (combMs);
+
+        ap1.assign ((size_t) ap1Len, 0.0f);
+        ap2.assign ((size_t) ap2Len, 0.0f);
+        comb.assign ((size_t) combLen, 0.0f);
+        ap1Pos = ap2Pos = combPos = 0;
+    }
+
+    void HarmonicSpace::Diffuser::clear()
+    {
+        std::fill (ap1.begin(), ap1.end(), 0.0f);
+        std::fill (ap2.begin(), ap2.end(), 0.0f);
+        std::fill (comb.begin(), comb.end(), 0.0f);
+        ap1Pos = ap2Pos = combPos = 0;
+        damping.reset();
+    }
+
+    float HarmonicSpace::Diffuser::process (float x, float feedback) noexcept
+    {
+        //  Two Schroeder allpasses (early diffusion)...
+        constexpr float k = 0.55f;
+
+        float delayed = ap1[(size_t) ap1Pos];
+        float v = x + k * delayed;
+        ap1[(size_t) ap1Pos] = v;
+        ap1Pos = (ap1Pos + 1) % ap1Len;
+        float y = delayed - k * v;
+
+        delayed = ap2[(size_t) ap2Pos];
+        v = y + k * delayed;
+        ap2[(size_t) ap2Pos] = v;
+        ap2Pos = (ap2Pos + 1) % ap2Len;
+        y = delayed - k * v;
+
+        //  ...into one damped, bounded feedback comb. No tail: at the maximum
+        //  feedback of 0.45 the energy is gone within a few passes.
+        const float combOut = comb[(size_t) combPos];
+        comb[(size_t) combPos] = y + feedback * damping.process (combOut);
+        combPos = (combPos + 1) % combLen;
+
+        return y + combOut;
+    }
+
+    void HarmonicSpace::prepare (double sampleRate, int, int numChannels, int bandIndex)
+    {
+        rate = sampleRate;
+        channels = juce::jlimit (1, 2, numChannels);
+        band = juce::jlimit (0, 3, bandIndex);
+
+        //  Per-band diffusion clocks (ms), R detuned 13% against L.
+        //                          LOW     LMID   HMID   HIGH
+        constexpr float ap1Ms[]  = { 13.1f,  7.9f,  4.7f,  2.9f };
+        constexpr float ap2Ms[]  = { 19.7f, 11.3f,  6.7f,  4.1f };
+        constexpr float combMs[] = { 29.3f, 17.9f, 10.9f,  6.7f };
+        constexpr float dampHz[] = { 2000.0f, 3500.0f, 6000.0f, 9000.0f };
+
+        for (int c = 0; c < 2; ++c)
+        {
+            const float detune = (c == 1 && band != 0) ? 1.13f : 1.0f;
+            diffuser[c].resize (sampleRate, ap1Ms[band] * detune,
+                                ap2Ms[band] * detune, combMs[band] * detune);
+            diffuser[c].damping.setCutoff (sampleRate, dampHz[band]);
+
+            //  Keep rumble out of the LOW band's diffusion; the residual's
+            //  harmonics live above the fundamental anyway.
+            residualHp[c].prepare (sampleRate, band == 0 ? 60.0f : 20.0f);
+
+            //  High-pass basis corner near the band's default centre, so the
+            //  fit can absorb first-order shelf responses in that region.
+            constexpr float basisHz[] = { 60.0f, 300.0f, 1800.0f, 8000.0f };
+            basisHp[c].setCutoff (sampleRate, basisHz[band]);
+        }
+
+        //  ~200 ms accumulator clock for the least-squares fit, ~30 ms for the
+        //  amount ramp.
+        accCoeff    = 1.0f - std::exp (-1.0f / (0.2f  * (float) sampleRate));
+        amountCoeff = 1.0f - std::exp (-1.0f / (0.03f * (float) sampleRate));
+
+        reset();
+    }
+
+    void HarmonicSpace::reset()
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            diffuser[c].clear();
+            residualHp[c].reset();
+            basisHp[c].reset();
+            fit[c] = {};
+        }
+        currentAmount = targetAmount;
+    }
+
+    void HarmonicSpace::setAmount (float amount01) noexcept
+    {
+        targetAmount = juce::jlimit (0.0f, 1.0f, amount01);
+    }
+
+    void HarmonicSpace::process (juce::AudioBuffer<float>& wet,
+                                 const juce::AudioBuffer<float>& clean, int n) noexcept
+    {
+        const int chans = juce::jmin (wet.getNumChannels(), channels);
+
+        float* w[2] = { wet.getWritePointer (0),
+                        chans > 1 ? wet.getWritePointer (1) : nullptr };
+        const float* cl[2] = { clean.getReadPointer (0),
+                               chans > 1 ? clean.getReadPointer (1) : nullptr };
+
+        const bool monoSpace = (band == 0) || chans == 1;
+
+        for (int i = 0; i < n; ++i)
+        {
+            currentAmount += amountCoeff * (targetAmount - currentAmount);
+            const float a = currentAmount;
+
+            //  Single-knob mapping: send, comb feedback and output level all
+            //  ride the one Space value.
+            const float feedback = 0.15f + 0.30f * a;
+            const float outGain  = 0.9f * a;
+
+            //  Two-basis residual per channel (see header).
+            auto residualFor = [this] (int c, float wc, float cc) noexcept
+            {
+                const float hc = basisHp[c].processHigh (cc);
+
+                auto& f = fit[c];
+                f.s00 += accCoeff * (cc * cc - f.s00);
+                f.s11 += accCoeff * (hc * hc - f.s11);
+                f.s01 += accCoeff * (cc * hc - f.s01);
+                f.r0  += accCoeff * (wc * cc - f.r0);
+                f.r1  += accCoeff * (wc * hc - f.r1);
+
+                const float det = f.s00 * f.s11 - f.s01 * f.s01;
+                float g0, g1;
+                if (det > 1.0e-12f)
+                {
+                    g0 = (f.r0 * f.s11 - f.r1 * f.s01) / det;
+                    g1 = (f.r1 * f.s00 - f.r0 * f.s01) / det;
+                }
+                else
+                {
+                    g0 = f.r0 / (f.s00 + 1.0e-9f);
+                    g1 = 0.0f;
+                }
+
+                g0 = juce::jlimit (0.0f, 4.0f, g0);
+                g1 = juce::jlimit (-4.0f, 4.0f, g1);
+                return wc - g0 * cc - g1 * hc;
+            };
+
+            if (monoSpace)
+            {
+                //  Mono path: average the residual, one diffuser, same signal
+                //  to both channels - the sub never widens.
+                float residual = 0.0f;
+                for (int c = 0; c < chans; ++c)
+                    residual += residualFor (c, w[c][i], cl[c][i]);
+                residual /= (float) chans;
+                residual = residualHp[0].process (residual);
+
+                const float halo = diffuser[0].process (residual * a, feedback) * outGain;
+                for (int c = 0; c < chans; ++c)
+                    w[c][i] += halo;
+            }
+            else
+            {
+                for (int c = 0; c < chans; ++c)
+                {
+                    float residual = residualHp[c].process (residualFor (c, w[c][i], cl[c][i]));
+                    w[c][i] += diffuser[c].process (residual * a, feedback) * outGain;
+                }
+            }
+        }
+    }
+}
+
+
+===== FILE: Source/Dsp/AutoLevel.h =====
+
+// Slow, bounded, internal loudness match between the wet chain's input and its
+// output. Not a compressor: the measurement window is long, the correction is
+// clamped to +/-12 dB, silence is ignored, and the gain moves over seconds.
+// It never writes to the visible Output parameter.
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+
+namespace fourcolor
+{
+    class AutoLevel
+    {
+    public:
+        AutoLevel() = default;
+
+        void prepare (double sampleRate);
+        void reset();
+
+        void setEnabled (bool shouldBeEnabled) noexcept { enabled = shouldBeEnabled; }
+
+        //  Call with the wet chain's input (post input trim, pre crossover).
+        void measureInput (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept;
+
+        //  Measures the pre-correction output, updates the slow gain, applies it.
+        void apply (juce::AudioBuffer<float>& buffer, int n, int chans) noexcept;
+
+        float getCurrentGain() const noexcept { return gain; }
+
+    private:
+        double rate = 48000.0;
+        bool enabled = true;
+
+        float inPower = 0.0f, outPower = 0.0f;
+        float measureCoeff = 0.0f;    // ~500 ms power window
+        float gainCoeff = 0.0f;       // ~1.5 s correction glide
+        float gain = 1.0f;
+
+        static constexpr float maxCorrection = 3.98f;      // +12 dB
+        static constexpr float minCorrection = 0.2512f;    // -12 dB
+        static constexpr float silenceGate = 1.0e-6f;      // -60 dBFS power
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AutoLevel)
+    };
+}
+
+
+===== FILE: Source/Dsp/AutoLevel.cpp =====
+
+#include "AutoLevel.h"
+
+namespace fourcolor
+{
+    void AutoLevel::prepare (double sampleRate)
+    {
+        rate = sampleRate;
+        measureCoeff = 1.0f - std::exp (-1.0f / (0.5f * (float) sampleRate));
+        gainCoeff    = 1.0f - std::exp (-1.0f / (1.5f * (float) sampleRate));
+        reset();
+    }
+
+    void AutoLevel::reset()
+    {
+        inPower = outPower = 0.0f;
+        gain = 1.0f;
+    }
+
+    void AutoLevel::measureInput (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
+    {
+        const float* d[2] = { buffer.getReadPointer (0),
+                              chans > 1 ? buffer.getReadPointer (1) : nullptr };
+
+        for (int i = 0; i < n; ++i)
+        {
+            float p = d[0][i] * d[0][i];
+            if (d[1] != nullptr)
+                p = 0.5f * (p + d[1][i] * d[1][i]);
+
+            inPower += measureCoeff * (p - inPower);
+        }
+    }
+
+    void AutoLevel::apply (juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
+    {
+        float* d[2] = { buffer.getWritePointer (0),
+                        chans > 1 ? buffer.getWritePointer (1) : nullptr };
+
+        for (int i = 0; i < n; ++i)
+        {
+            float p = d[0][i] * d[0][i];
+            if (d[1] != nullptr)
+                p = 0.5f * (p + d[1][i] * d[1][i]);
+
+            outPower += measureCoeff * (p - outPower);
+
+            //  Above the silence gate, glide towards the bounded correction;
+            //  in silence, hold (never chase noise floors).
+            float target = gain;
+            if (! enabled)
+                target = 1.0f;
+            else if (inPower > silenceGate && outPower > silenceGate)
+                target = juce::jlimit (minCorrection, maxCorrection,
+                                       std::sqrt (inPower / outPower));
+
+            gain += gainCoeff * (target - gain);
+
+            d[0][i] *= gain;
+            if (d[1] != nullptr)
+                d[1][i] *= gain;
+        }
+    }
+}
+
+
+===== FILE: Source/Dsp/BandProcessor.h =====
+
+// One band end to end: latency-aligned clean reference, pre-tone, oversampled
+// colour, post-tone, band mix, level, mute and bypass. Solo is resolved by the
+// owner (it needs to know about all four bands) and arrives here as a gain.
+//
+// The clean reference is delayed by the oversampler's (fractional) latency
+// through a Lagrange line, so Band Mix and Band Bypass never comb-filter.
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_dsp/juce_dsp.h>
+
+#include "../Core/ParameterIds.h"
+#include "BehaviorDetector.h"
+#include "HarmonicSpace.h"
+#include "NonlinearStage.h"
+#include "ToneStage.h"
+
+namespace fourcolor
+{
+    class BandProcessor
+    {
+    public:
+        BandProcessor() = default;
+
+        void prepare (double sampleRate, int maxBlockSize, int numChannels, int bandIndex);
+        void reset();
+
+        struct Settings
+        {
+            ColorType color = ColorType::warm;
+            float drivePercent = 25.0f;
+            float behavior = 0.0f;        // -1..1 (wired in Phase 5)
+            float tone = 0.0f;            // -1..1
+            float spacePercent = 0.0f;    // handled by the owner (Phase 6)
+            float bandMix = 1.0f;         // 0..1
+            float levelDb = 0.0f;
+            bool  mute = false;
+            bool  bypass = false;
+            float soloGain = 1.0f;        // resolved by the owner
+            float centreHz = 500.0f;      // band geometric centre, for Tone
+        };
+
+        void setSettings (const Settings& s) noexcept;
+
+        //  Returns true if the oversampling factor changed (owner must realign).
+        bool setQuality (Quality q) noexcept;
+
+        //  In place. The buffer is this band's split from the crossover.
+        void process (juce::AudioBuffer<float>& buffer) noexcept;
+
+        float getLatencySamples() const noexcept { return nonlinear.getLatencySamples(); }
+
+        //  Block peak of this band's OUTPUT (post mix/level/mute), for the UI
+        //  band meters. Lock-free; the reader exchanges it back to zero.
+        float readAndResetOutputPeak() noexcept { return outputPeak.exchange (0.0f); }
+
+        //  The wet path this block, before mix/level - used by HarmonicSpace.
+        NonlinearStage& getNonlinearStage() noexcept { return nonlinear; }
+
+    private:
+        void updateCleanDelay() noexcept;
+
+        double rate = 48000.0;
+        int channels = 2;
+        int maxBlock = 0;
+        int bandIndex = 0;
+
+        NonlinearStage nonlinear;
+        ToneStage tone;
+        BehaviorDetector behavior;
+        HarmonicSpace space;
+        juce::AudioBuffer<float> behaviorMod;   // one stereo-linked curve
+
+        //  Thiran: allpass interpolation, magnitude-flat at fractional delays.
+        //  (Lagrange3rd was measured drooping -0.44 dB at 12 kHz on the 59.5
+        //  sample delay of 4x quality.)
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran> cleanDelay;
+        juce::AudioBuffer<float> cleanBuffer;
+
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> levelGain { 1.0f };
+        juce::SmoothedValue<float> mixSmoothed { 1.0f };
+        juce::SmoothedValue<float> muteFade { 1.0f };      // 1 = audible
+        juce::SmoothedValue<float> bypassFade { 0.0f };    // 1 = bypassed (clean)
+        juce::SmoothedValue<float> soloFade { 1.0f };
+        juce::SmoothedValue<float> driveSmoothed { 25.0f };
+
+        Settings settings;
+        std::atomic<float> outputPeak { 0.0f };
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BandProcessor)
+    };
+}
+
+
+===== FILE: Source/Dsp/BandProcessor.cpp =====
+
+#include "BandProcessor.h"
+
+namespace fourcolor
+{
+    void BandProcessor::prepare (double sampleRate, int maxBlockSize, int numChannels, int index)
+    {
+        rate = sampleRate;
+        maxBlock = maxBlockSize;
+        channels = juce::jlimit (1, 2, numChannels);
+        bandIndex = index;
+
+        nonlinear.prepare (sampleRate, maxBlockSize, channels);
+        tone.prepare (sampleRate, channels);
+        behavior.prepare (sampleRate, index);
+        space.prepare (sampleRate, maxBlockSize, channels, index);
+
+        cleanBuffer.setSize (channels, maxBlockSize);
+        behaviorMod.setSize (1, maxBlockSize);
+
+        //  Sized for the worst oversampler latency plus interpolation headroom.
+        cleanDelay.setMaximumDelayInSamples ((int) std::ceil (nonlinear.getMaxLatencySamples()) + 8);
+        cleanDelay.prepare ({ sampleRate, (juce::uint32) maxBlockSize, (juce::uint32) channels });
+
+        const double smoothTime = 0.02;
+        levelGain.reset (sampleRate, smoothTime);
+        mixSmoothed.reset (sampleRate, smoothTime);
+        muteFade.reset (sampleRate, 0.01);
+        bypassFade.reset (sampleRate, 0.01);
+        soloFade.reset (sampleRate, 0.01);
+        driveSmoothed.reset (sampleRate, 0.05);
+
+        updateCleanDelay();
+        reset();
+    }
+
+    void BandProcessor::reset()
+    {
+        nonlinear.reset();
+        tone.reset();
+        behavior.reset();
+        space.reset();
+        cleanDelay.reset();
+        cleanBuffer.clear();
+
+        levelGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (settings.levelDb));
+        mixSmoothed.setCurrentAndTargetValue (settings.bandMix);
+        muteFade.setCurrentAndTargetValue (settings.mute ? 0.0f : 1.0f);
+        bypassFade.setCurrentAndTargetValue (settings.bypass ? 1.0f : 0.0f);
+        soloFade.setCurrentAndTargetValue (settings.soloGain);
+        driveSmoothed.setCurrentAndTargetValue (settings.drivePercent);
+    }
+
+    void BandProcessor::updateCleanDelay() noexcept
+    {
+        cleanDelay.setDelay (juce::jmax (0.0f, nonlinear.getLatencySamples()));
+    }
+
+    void BandProcessor::setSettings (const Settings& s) noexcept
+    {
+        settings = s;
+
+        nonlinear.setColor (s.color);
+        driveSmoothed.setTargetValue (s.drivePercent);
+        tone.setTone (s.tone, s.centreHz);
+        behavior.setBehavior (s.behavior);
+        space.setAmount (s.spacePercent * 0.01f);
+
+        levelGain.setTargetValue (juce::Decibels::decibelsToGain (s.levelDb));
+        mixSmoothed.setTargetValue (s.bandMix);
+        muteFade.setTargetValue (s.mute ? 0.0f : 1.0f);
+        bypassFade.setTargetValue (s.bypass ? 1.0f : 0.0f);
+        soloFade.setTargetValue (s.soloGain);
+    }
+
+    bool BandProcessor::setQuality (Quality q) noexcept
+    {
+        const bool changed = nonlinear.setQuality (q);
+        if (changed)
+        {
+            cleanDelay.reset();
+            updateCleanDelay();
+        }
+        return changed;
+    }
+
+    void BandProcessor::process (juce::AudioBuffer<float>& buffer) noexcept
+    {
+        const int n = buffer.getNumSamples();
+        const int chans = juce::jmin (buffer.getNumChannels(), channels);
+        if (n == 0)
+            return;
+
+        //  Clean reference, delayed to align with the oversampler's latency.
+        for (int c = 0; c < chans; ++c)
+        {
+            auto* src = buffer.getReadPointer (c);
+            auto* dst = cleanBuffer.getWritePointer (c);
+
+            for (int i = 0; i < n; ++i)
+            {
+                cleanDelay.pushSample (c, src[i]);
+                dst[i] = cleanDelay.popSample (c);
+            }
+        }
+
+        //  Behavior modulation from the CLEAN band input (before tone or
+        //  drive), one stereo-linked curve shared by both channels.
+        const float* modPtrs[2] = { nullptr, nullptr };
+        if (behavior.isActive())
+        {
+            behavior.writeModulation (buffer, behaviorMod.getWritePointer (0), n);
+            modPtrs[0] = modPtrs[1] = behaviorMod.getReadPointer (0);
+        }
+
+        //  Drive is smoothed at block granularity: the engines' curves are
+        //  continuous in drive, so 32-512 sample steps of a smoothed value
+        //  stay click-free (asserted by the automation test).
+        nonlinear.setDrive (driveSmoothed.skip (n));
+
+        //  Wet path: pre-tone -> oversampled colour -> post-tone.
+        tone.processPre (buffer);
+        nonlinear.process (buffer, behavior.isActive() ? modPtrs : nullptr);
+        tone.processPost (buffer);
+
+        //  Harmonic Space: adds the diffused nonlinear residual to the wet
+        //  path. Skipped entirely at 0% - no CPU spent.
+        if (space.isActive())
+            space.process (buffer, cleanBuffer, n);
+
+        //  Mix / level / mute / bypass / solo, all with per-sample fades.
+        //  Samples outer, channels inner, so each SmoothedValue advances
+        //  exactly once per sample and both channels get identical gains.
+        float* wet[2]   = { buffer.getWritePointer (0),
+                            chans > 1 ? buffer.getWritePointer (1) : nullptr };
+        const float* clean[2] = { cleanBuffer.getReadPointer (0),
+                                  chans > 1 ? cleanBuffer.getReadPointer (1) : nullptr };
+
+        float blockPeak = 0.0f;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float mix  = mixSmoothed.getNextValue();
+            const float lvl  = levelGain.getNextValue();
+            const float mute = muteFade.getNextValue();
+            const float byp  = bypassFade.getNextValue();
+            const float solo = soloFade.getNextValue();
+
+            for (int c = 0; c < chans; ++c)
+            {
+                const float mixed   = clean[c][i] + mix * (wet[c][i] - clean[c][i]);
+                const float leveled = mixed * lvl;
+                //  Bypass returns the UNleveled clean band, so four bypassed
+                //  bands reconstruct the input exactly.
+                const float out = leveled + byp * (clean[c][i] - leveled);
+                wet[c][i] = out * mute * solo;
+                blockPeak = juce::jmax (blockPeak, std::abs (wet[c][i]));
+            }
+        }
+
+        if (blockPeak > outputPeak.load (std::memory_order_relaxed))
+            outputPeak.store (blockPeak, std::memory_order_relaxed);
+    }
+}
+
+
+===== FILE: Source/Dsp/FourColorEngine.h =====
+
+// The whole audio path, host-independent, so the test suite can drive it
+// without a plugin wrapper.
+//
+//   input trim -> 4-band crossover -> per-band [tone/colour/mix/level] ->
+//   recombine -> (global tone + auto level: Phase 7) -> fractional wet
+//   alignment -> latency-compensated dry/wet -> output trim -> safety
+//
+// Latency contract: the oversampler's fractional latency L is rounded UP to
+// the integer reported to the host; the wet sum is delayed by (ceil(L) - L)
+// through a Lagrange line and the dry path by ceil(L) exactly, so Mix and
+// global Bypass are sample-aligned at every quality.
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_dsp/juce_dsp.h>
+
+#include "../Core/ParameterIds.h"
+#include "AutoLevel.h"
+#include "BandProcessor.h"
+#include "Crossover.h"
+
+namespace fourcolor
+{
+    //  All user parameter values in engine units, pushed once per block from the
+    //  APVTS by the processor (or set directly by the tests).
+    struct EngineParameters
+    {
+        float inputDb      = 0.0f;
+        float globalDrive  = 50.0f;   // 0..100, 50 = neutral
+        float globalTone   = 0.0f;    // -100..100
+        bool  autoLevel    = true;
+        float mixPercent   = 100.0f;
+        float outputDb     = 0.0f;
+        Quality quality    = Quality::high;
+        bool  bypassed     = false;
+        float xoverHz[3]   = { 120.0f, 700.0f, 4500.0f };
+
+        struct Band
+        {
+            ColorType color  = ColorType::warm;
+            float drive      = 25.0f;   // 0..100
+            float behavior   = 0.0f;    // -100..100
+            float tone       = 0.0f;    // -100..100
+            float space      = 0.0f;    // 0..100
+            float bandMix    = 100.0f;  // 0..100
+            float levelDb    = 0.0f;
+            bool  solo       = false;
+            bool  mute       = false;
+            bool  bypass     = false;
+        };
+        Band bands[numBands];
+    };
+
+    class FourColorEngine
+    {
+    public:
+        FourColorEngine() = default;
+
+        void prepare (double sampleRate, int maxBlockSize, int numChannels);
+        void reset();
+
+        //  Called from the audio thread once per block, before process().
+        //  Copies values only; must not allocate.
+        void setParameters (const EngineParameters& p) noexcept;
+
+        void process (juce::AudioBuffer<float>& buffer) noexcept;
+
+        //  Total latency of the wet path at the host rate (integer contract).
+        int getLatencySamples() const noexcept { return latencySamples; }
+
+        Crossover& getCrossover() noexcept { return crossover; }
+        BandProcessor& getBand (int i) noexcept { return bands[i]; }
+
+    private:
+        void applySafety (juce::AudioBuffer<float>& buffer) noexcept;
+        void updateLatency() noexcept;
+
+        EngineParameters params;
+
+        double sampleRate  = 44100.0;
+        int    maxBlock    = 0;
+        int    numChannels = 2;
+        int    latencySamples = 0;
+
+        Crossover crossover;
+        BandProcessor bands[numBands];
+        AutoLevel autoLevel;
+
+        juce::AudioBuffer<float> bandBuffers[numBands];
+        juce::AudioBuffer<float> dryBuffer;      // TRUE dry (for global bypass)
+        juce::AudioBuffer<float> mixDryBuffer;   // allpassed dry (for Mix)
+        juce::AudioBuffer<float> apRefBuffer;    // crossover's allpass reference
+
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay;
+        //  The Mix dry leg is the crossover's ALLPASS REFERENCE, not the raw
+        //  input: the wet sum carries the crossover's phase rotation, and
+        //  mixing raw dry against it would comb around the crossover points
+        //  no matter how exact the delay alignment is. Global bypass still
+        //  uses the true dry path.
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> mixDryDelay;
+        //  Thiran for magnitude-flat fractional alignment (see BandProcessor.h).
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran> wetAlign;
+        float wetAlignDelay = 0.0f;
+
+        //  Global Tone: a tilt around 800 Hz, +/-6 dB per side.
+        dsp::OnePole tiltSplit[2];
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> tiltHighGain { 1.0f };
+
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> inputGain  { 1.0f };
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain { 1.0f };
+        juce::SmoothedValue<float> mixSmoothed { 1.0f };
+        juce::SmoothedValue<float> bypassFade  { 0.0f };   // 0 = active, 1 = bypassed
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FourColorEngine)
+    };
+}
+
+
+===== FILE: Source/Dsp/FourColorEngine.cpp =====
+
+#include "FourColorEngine.h"
+
+namespace fourcolor
+{
+    void FourColorEngine::prepare (double newSampleRate, int maxBlockSize, int channels)
+    {
+        sampleRate  = newSampleRate;
+        maxBlock    = maxBlockSize;
+        numChannels = juce::jlimit (1, 2, channels);
+
+        crossover.prepare (sampleRate, maxBlockSize, numChannels);
+
+        for (int b = 0; b < numBands; ++b)
+        {
+            bands[b].prepare (sampleRate, maxBlockSize, numChannels, b);
+            bandBuffers[b].setSize (numChannels, maxBlockSize);
+        }
+
+        dryBuffer.setSize (numChannels, maxBlockSize);
+        mixDryBuffer.setSize (numChannels, maxBlockSize);
+        apRefBuffer.setSize (numChannels, maxBlockSize);
+
+        autoLevel.prepare (sampleRate);
+
+        const int maxDelay = (int) std::ceil (bands[0].getNonlinearStage().getMaxLatencySamples()) + 8;
+        const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) maxBlockSize,
+                                            (juce::uint32) numChannels };
+        dryDelay.setMaximumDelayInSamples (maxDelay);
+        dryDelay.prepare (spec);
+        mixDryDelay.setMaximumDelayInSamples (maxDelay);
+        mixDryDelay.prepare (spec);
+        wetAlign.setMaximumDelayInSamples (8);
+        wetAlign.prepare (spec);
+
+        for (auto& t : tiltSplit)
+            t.setCutoff (sampleRate, 800.0f);
+
+        const double fastSmooth = 0.02;
+        inputGain .reset (sampleRate, fastSmooth);
+        outputGain.reset (sampleRate, fastSmooth);
+        mixSmoothed.reset (sampleRate, fastSmooth);
+        bypassFade .reset (sampleRate, 0.01);
+        tiltHighGain.reset (sampleRate, 0.05);
+
+        updateLatency();
+        reset();
+    }
+
+    void FourColorEngine::updateLatency() noexcept
+    {
+        //  All bands share one oversampling factor, hence one latency.
+        const float osLatency = bands[0].getLatencySamples();
+        latencySamples = (int) std::ceil (osLatency);
+        wetAlignDelay  = (float) latencySamples - osLatency;
+
+        wetAlign.setDelay (wetAlignDelay);
+        dryDelay.setDelay ((float) latencySamples);
+        mixDryDelay.setDelay ((float) latencySamples);
+    }
+
+    void FourColorEngine::reset()
+    {
+        crossover.reset();
+        for (auto& b : bands)
+            b.reset();
+        for (auto& bb : bandBuffers)
+            bb.clear();
+
+        dryBuffer.clear();
+        mixDryBuffer.clear();
+        apRefBuffer.clear();
+        dryDelay.reset();
+        mixDryDelay.reset();
+        wetAlign.reset();
+        autoLevel.reset();
+
+        for (auto& t : tiltSplit)
+            t.reset();
+
+        inputGain .setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.inputDb));
+        outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.outputDb));
+        mixSmoothed.setCurrentAndTargetValue (params.mixPercent * 0.01f);
+        bypassFade .setCurrentAndTargetValue (params.bypassed ? 1.0f : 0.0f);
+    }
+
+    void FourColorEngine::setParameters (const EngineParameters& p) noexcept
+    {
+        params = p;
+
+        inputGain .setTargetValue (juce::Decibels::decibelsToGain (p.inputDb));
+        outputGain.setTargetValue (juce::Decibels::decibelsToGain (p.outputDb));
+        mixSmoothed.setTargetValue (p.mixPercent * 0.01f);
+        bypassFade .setTargetValue (p.bypassed ? 1.0f : 0.0f);
+
+        //  Global Tone: +/-6 dB tilt; the low side gets the reciprocal.
+        tiltHighGain.setTargetValue (std::pow (10.0f, (p.globalTone * 0.01f) * 6.0f / 20.0f));
+
+        autoLevel.setEnabled (p.autoLevel);
+
+        crossover.setFrequencies (p.xoverHz[0], p.xoverHz[1], p.xoverHz[2]);
+
+        //  Solo logic needs all four bands, so it is resolved here.
+        bool anySolo = false;
+        for (const auto& b : p.bands)
+            anySolo = anySolo || b.solo;
+
+        //  Band centres for the Tone shelves, from the current crossover cuts.
+        const float f1 = p.xoverHz[0], f2 = p.xoverHz[1], f3 = p.xoverHz[2];
+        const float centres[numBands] = {
+            std::sqrt (20.0f * f1), std::sqrt (f1 * f2),
+            std::sqrt (f2 * f3),    std::sqrt (f3 * 16000.0f)
+        };
+
+        bool qualityChanged = false;
+        for (int b = 0; b < numBands; ++b)
+        {
+            qualityChanged = bands[b].setQuality (p.quality) || qualityChanged;
+
+            //  Global Drive scales the four RELATIVE band drives around their
+            //  values: 50 is neutral, 0 silences the drive, 100 doubles it.
+            const float driveScale = p.globalDrive / 50.0f;
+
+            BandProcessor::Settings s;
+            s.color        = p.bands[b].color;
+            s.drivePercent = juce::jlimit (0.0f, 100.0f, p.bands[b].drive * driveScale);
+            s.behavior     = p.bands[b].behavior * 0.01f;
+            s.tone         = p.bands[b].tone * 0.01f;
+            s.spacePercent = p.bands[b].space;
+            s.bandMix      = p.bands[b].bandMix * 0.01f;
+            s.levelDb      = p.bands[b].levelDb;
+            s.mute         = p.bands[b].mute;
+            s.bypass       = p.bands[b].bypass;
+            s.soloGain     = anySolo ? (p.bands[b].solo ? 1.0f : 0.0f) : 1.0f;
+            s.centreHz     = centres[b];
+            bands[b].setSettings (s);
+        }
+
+        if (qualityChanged)
+        {
+            //  New oversampler latency: realign both compensation delays. The
+            //  host is told through getLatencySamples() by the processor.
+            dryDelay.reset();
+            wetAlign.reset();
+            updateLatency();
+        }
+    }
+
+    void FourColorEngine::process (juce::AudioBuffer<float>& buffer) noexcept
+    {
+        juce::ScopedNoDenormals noDenormals;
+
+        const int n = buffer.getNumSamples();
+        const int chans = juce::jmin (buffer.getNumChannels(), numChannels);
+        if (n == 0)
+            return;
+
+        //  Input trim feeds everything, including the dry tap.
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = inputGain.getNextValue();
+            for (int c = 0; c < chans; ++c)
+                buffer.getWritePointer (c)[i] *= g;
+        }
+
+        //  True-dry tap, delayed by the reported (integer) latency - this is
+        //  what global bypass returns.
+        for (int c = 0; c < chans; ++c)
+        {
+            auto* src = buffer.getReadPointer (c);
+            auto* dst = dryBuffer.getWritePointer (c);
+            for (int i = 0; i < n; ++i)
+            {
+                dryDelay.pushSample (c, src[i]);
+                dst[i] = dryDelay.popSample (c);
+            }
+        }
+
+        //  Loudness reference for Auto Level: the wet chain's own input.
+        autoLevel.measureInput (buffer, n, chans);
+
+        //  Split, process each band, recombine. The crossover also emits its
+        //  allpass reference - the phase-matched dry leg for Mix.
+        crossover.process (buffer, bandBuffers, &apRefBuffer);
+
+        for (int c = 0; c < chans; ++c)
+        {
+            auto* src = apRefBuffer.getReadPointer (c);
+            auto* dst = mixDryBuffer.getWritePointer (c);
+            for (int i = 0; i < n; ++i)
+            {
+                mixDryDelay.pushSample (c, src[i]);
+                dst[i] = mixDryDelay.popSample (c);
+            }
+        }
+
+        for (int b = 0; b < numBands; ++b)
+        {
+            //  The band buffers were sized in prepare; give each processor a
+            //  view of the current block length.
+            juce::AudioBuffer<float> view (bandBuffers[b].getArrayOfWritePointers(), chans, n);
+            bands[b].process (view);
+        }
+
+        buffer.clear();
+        for (int b = 0; b < numBands; ++b)
+            for (int c = 0; c < chans; ++c)
+                buffer.addFrom (c, 0, bandBuffers[b], c, 0, n);
+
+        //  Global Tone: tilt around 800 Hz. The low side gets the reciprocal
+        //  gain so the tilt pivots rather than just shelving.
+        for (int i = 0; i < n; ++i)
+        {
+            const float hg = tiltHighGain.getNextValue();
+            const float lg = 1.0f / hg;
+
+            for (int c = 0; c < chans; ++c)
+            {
+                auto* d = buffer.getWritePointer (c);
+                const float low = tiltSplit[c].process (d[i]);
+                d[i] = low * lg + (d[i] - low) * hg;
+            }
+        }
+
+        //  Auto Level: slow bounded internal match against the measured input.
+        autoLevel.apply (buffer, n, chans);
+
+        //  Fractional wet alignment: wet total latency becomes exactly the
+        //  integer reported to the host.
+        if (wetAlignDelay > 1.0e-4f)
+        {
+            for (int c = 0; c < chans; ++c)
+            {
+                auto* d = buffer.getWritePointer (c);
+                for (int i = 0; i < n; ++i)
+                {
+                    wetAlign.pushSample (c, d[i]);
+                    d[i] = wetAlign.popSample (c);
+                }
+            }
+        }
+
+        //  Latency-compensated dry/wet (against the phase-matched dry leg),
+        //  output trim, global bypass (against the TRUE dry).
+        for (int i = 0; i < n; ++i)
+        {
+            const float mix  = mixSmoothed.getNextValue();
+            const float gOut = outputGain.getNextValue();
+            const float byp  = bypassFade.getNextValue();
+
+            for (int c = 0; c < chans; ++c)
+            {
+                const float trueDry = dryBuffer.getSample (c, i);
+                const float mixDry  = mixDryBuffer.getSample (c, i);
+                const float wet     = buffer.getSample (c, i);
+
+                const float mixed = (mixDry + mix * (wet - mixDry)) * gOut;
+                buffer.setSample (c, i, mixed + byp * (trueDry - mixed));
+            }
+        }
+
+        applySafety (buffer);
+    }
+
+    void FourColorEngine::applySafety (juce::AudioBuffer<float>& buffer) noexcept
+    {
+        //  Last line of defence: scrub non-finite samples and softly limit
+        //  anything absurd so a DSP fault can never blast the monitors.
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            auto* data = buffer.getWritePointer (ch);
+
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                float x = data[i];
+
+                if (! std::isfinite (x))
+                    x = 0.0f;
+                else if (std::abs (x) > 4.0f)
+                    x = (x > 0.0f ? 4.0f : -4.0f);
+
+                data[i] = x;
+            }
+        }
+    }
+}
+
+
+===== FILE: Source/PluginProcessor.h =====
+
+#pragma once
+
+#include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_dsp/juce_dsp.h>
+
+#include "Core/ParameterIds.h"
+#include "Dsp/FourColorEngine.h"
+
+namespace fourcolor
+{
+    class FourColorProcessor : public juce::AudioProcessor,
+                               private juce::AudioProcessorValueTreeState::Listener
+    {
+    public:
+        FourColorProcessor();
+        ~FourColorProcessor() override = default;
+
+        // --- AudioProcessor ------------------------------------------------------
+        void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+        void releaseResources() override;
+        bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+        void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+
+        juce::AudioProcessorEditor* createEditor() override;
+        bool hasEditor() const override                        { return true; }
+
+        const juce::String getName() const override            { return "FOUR COLOR"; }
+        bool acceptsMidi() const override                      { return false; }
+        bool producesMidi() const override                     { return false; }
+        bool isMidiEffect() const override                     { return false; }
+        double getTailLengthSeconds() const override           { return 0.1; }
+
+        int getNumPrograms() override;
+        int getCurrentProgram() override                       { return currentProgram; }
+        void setCurrentProgram (int index) override;
+        const juce::String getProgramName (int index) override;
+        void changeProgramName (int, const juce::String&) override {}
+
+        void getStateInformation (juce::MemoryBlock& destData) override;
+        void setStateInformation (const void* data, int sizeInBytes) override;
+
+        juce::AudioProcessorParameter* getBypassParameter() const override;
+
+        // --- shared with the editor ---------------------------------------------
+        juce::AudioProcessorValueTreeState apvts;
+
+        FourColorEngine& getEngine() noexcept { return engine; }
+
+        //  --- UI services ---------------------------------------------------------
+        //  Block-peak meters (atomics written on the audio thread). Channel
+        //  0 = L, 1 = R; the mono sum forms are kept for the older callers.
+        float readAndResetInputPeak() noexcept  { return juce::jmax (inputPeak[0].exchange (0.0f),
+                                                                     inputPeak[1].exchange (0.0f)); }
+        float readAndResetOutputPeak() noexcept { return juce::jmax (outputPeak[0].exchange (0.0f),
+                                                                     outputPeak[1].exchange (0.0f)); }
+        float readAndResetInputPeak (int channel) noexcept  { return inputPeak[channel & 1].exchange (0.0f); }
+        float readAndResetOutputPeak (int channel) noexcept { return outputPeak[channel & 1].exchange (0.0f); }
+
+        //  A/B compare (message thread only): two full-state slots.
+        void toggleAB();
+        void copyABToOther();
+        int getABIndex() const noexcept { return abIndex; }
+
+        //  Preset navigation + modified marker for the UI.
+        void stepProgram (int delta);
+        bool isPresetDirty() const noexcept { return presetDirty.load(); }
+
+        //  Undo of parameter edits (the editor groups transactions on idle).
+        juce::UndoManager undoManager;
+
+        //  --- output spectrum tap (lock-free, interleaved MID/SIDE) ---------------
+        //  The editor drains this to run its FFTs; nothing in the display is
+        //  faked. `dest` receives `maxFrames * 2` floats as [mid, side] pairs.
+        //  Returns the number of FRAMES written.
+        int readSpectrumFrames (float* dest, int maxFrames) noexcept;
+
+        static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+
+    private:
+        void cacheParameterPointers();
+        void pushParametersToEngine() noexcept;
+
+        //  Raw-value pointers cached at construction so the audio thread never
+        //  builds parameter-ID strings. (The allocation tripwire in the test
+        //  suite caught exactly that.)
+        struct BandPointers
+        {
+            std::atomic<float>* color;
+            std::atomic<float>* drive;
+            std::atomic<float>* behavior;
+            std::atomic<float>* tone;
+            std::atomic<float>* space;
+            std::atomic<float>* bandMix;
+            std::atomic<float>* level;
+            std::atomic<float>* solo;
+            std::atomic<float>* mute;
+            std::atomic<float>* bypass;
+        };
+        struct GlobalPointers
+        {
+            std::atomic<float>* input;
+            std::atomic<float>* globalDrive;
+            std::atomic<float>* globalTone;
+            std::atomic<float>* autoLevel;
+            std::atomic<float>* mix;
+            std::atomic<float>* output;
+            std::atomic<float>* quality;
+            std::atomic<float>* bypassed;
+            std::atomic<float>* xover[3];
+        };
+
+        GlobalPointers globalPtrs {};
+        BandPointers   bandPtrs[numBands] {};
+
+        FourColorEngine engine;
+        int currentProgram = 0;
+
+        void parameterChanged (const juce::String&, float) override { presetDirty.store (true); }
+        void pushSpectrumSamples (const juce::AudioBuffer<float>& buffer) noexcept;
+
+        std::atomic<float> inputPeak[2] { { 0.0f }, { 0.0f } };
+        std::atomic<float> outputPeak[2] { { 0.0f }, { 0.0f } };
+        std::atomic<bool> presetDirty { false };
+
+        //  Frames of [mid, side]; sized once, never reallocated.
+        static constexpr int spectrumFifoFrames = 8192;
+        juce::AbstractFifo spectrumFifo { spectrumFifoFrames };
+        std::vector<float> spectrumData = std::vector<float> (spectrumFifoFrames * 2, 0.0f);
+
+        juce::MemoryBlock abSlots[2];
+        int abIndex = 0;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FourColorProcessor)
+    };
+}
+
+
+===== FILE: Source/PluginProcessor.cpp =====
+
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+#include "Core/PresetLibrary.h"
+
+namespace fourcolor
+{
+    namespace
+    {
+        juce::NormalisableRange<float> logHzRange (float lo, float hi)
+        {
+            juce::NormalisableRange<float> r (lo, hi);
+            r.setSkewForCentre (std::sqrt (lo * hi));
+            return r;
+        }
+
+        auto percent()  { return juce::NormalisableRange<float> (0.0f, 100.0f, 0.0f); }
+        auto bipolar()  { return juce::NormalisableRange<float> (-100.0f, 100.0f, 0.0f); }
+
+        juce::String dbText (float v, int)      { return juce::String (v, 1) + " dB"; }
+        juce::String pctText (float v, int)     { return juce::String (juce::roundToInt (v)) + " %"; }
+        juce::String hzText (float v, int)
+        {
+            return v >= 1000.0f ? juce::String (v / 1000.0f, 2) + " kHz"
+                                : juce::String (juce::roundToInt (v)) + " Hz";
+        }
+        juce::String bipolarText (const char* neg, const char* pos, float v)
+        {
+            const int i = juce::roundToInt (v);
+            if (i == 0) return "0";
+            return juce::String (std::abs (i)) + " " + (i < 0 ? neg : pos);
+        }
+    }
+
+    juce::AudioProcessorValueTreeState::ParameterLayout FourColorProcessor::createParameterLayout()
+    {
+        using P     = juce::AudioParameterFloat;
+        using Pc    = juce::AudioParameterChoice;
+        using Pb    = juce::AudioParameterBool;
+        namespace p = param;
+
+        juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+        auto attr = [] (auto textFn) {
+            return juce::AudioParameterFloatAttributes().withStringFromValueFunction (textFn);
+        };
+
+        // --- global ------------------------------------------------------------
+        layout.add (std::make_unique<P> (juce::ParameterID { p::input, 1 }, "Input",
+                        juce::NormalisableRange<float> (-24.0f, 24.0f), 0.0f, attr (dbText)));
+        layout.add (std::make_unique<P> (juce::ParameterID { p::globalDrive, 1 }, "Global Drive",
+                        percent(), 50.0f, attr (pctText)));
+        layout.add (std::make_unique<P> (juce::ParameterID { p::globalTone, 1 }, "Global Tone",
+                        bipolar(), 0.0f,
+                        attr ([] (float v, int) { return bipolarText ("DARK", "BRIGHT", v); })));
+        layout.add (std::make_unique<Pb> (juce::ParameterID { p::autoLevel, 1 }, "Auto Level", true));
+        layout.add (std::make_unique<P> (juce::ParameterID { p::mix, 1 }, "Mix",
+                        percent(), 100.0f, attr (pctText)));
+        layout.add (std::make_unique<P> (juce::ParameterID { p::output, 1 }, "Output",
+                        juce::NormalisableRange<float> (-24.0f, 12.0f), 0.0f, attr (dbText)));
+        layout.add (std::make_unique<Pc> (juce::ParameterID { p::quality, 1 }, "Quality",
+                        juce::StringArray { "Draft", "Normal", "High", "Ultra" }, (int) Quality::high));
+        layout.add (std::make_unique<Pb> (juce::ParameterID { p::bypassed, 1 }, "Bypass", false));
+
+        layout.add (std::make_unique<P> (juce::ParameterID { p::xover1, 1 }, "Crossover 1",
+                        logHzRange (40.0f, 400.0f), 120.0f, attr (hzText)));
+        layout.add (std::make_unique<P> (juce::ParameterID { p::xover2, 1 }, "Crossover 2",
+                        logHzRange (250.0f, 2500.0f), 700.0f, attr (hzText)));
+        layout.add (std::make_unique<P> (juce::ParameterID { p::xover3, 1 }, "Crossover 3",
+                        logHzRange (1500.0f, 12000.0f), 4500.0f, attr (hzText)));
+
+        // --- per band ----------------------------------------------------------
+        for (int b = 0; b < numBands; ++b)
+        {
+            const juce::String prefix = juce::String (bandName (b)) + " ";
+            auto id = [b] (const char* suffix) {
+                return juce::ParameterID { param::band (b, suffix), 1 };
+            };
+
+            layout.add (std::make_unique<Pc> (id (p::color), prefix + "Color",
+                            juce::StringArray { "Warm", "Iron", "Bite", "Fuzz" }, 0));
+            layout.add (std::make_unique<P> (id (p::drive), prefix + "Drive",
+                            percent(), 25.0f, attr (pctText)));
+            layout.add (std::make_unique<P> (id (p::behavior), prefix + "Behavior",
+                            bipolar(), 0.0f,
+                            attr ([] (float v, int) { return bipolarText ("BODY", "ATTACK", v); })));
+            layout.add (std::make_unique<P> (id (p::tone), prefix + "Tone",
+                            bipolar(), 0.0f,
+                            attr ([] (float v, int) { return bipolarText ("DARK", "BRIGHT", v); })));
+            layout.add (std::make_unique<P> (id (p::space), prefix + "Space",
+                            percent(), 0.0f, attr (pctText)));
+            layout.add (std::make_unique<P> (id (p::bandMix), prefix + "Mix",
+                            percent(), 100.0f, attr (pctText)));
+            layout.add (std::make_unique<P> (id (p::level), prefix + "Level",
+                            juce::NormalisableRange<float> (-18.0f, 12.0f), 0.0f, attr (dbText)));
+            layout.add (std::make_unique<Pb> (id (p::solo), prefix + "Solo", false));
+            layout.add (std::make_unique<Pb> (id (p::mute), prefix + "Mute", false));
+            layout.add (std::make_unique<Pb> (id (p::bypass), prefix + "Bypass", false));
+        }
+
+        return layout;
+    }
+
+    FourColorProcessor::FourColorProcessor()
+        : AudioProcessor (BusesProperties()
+                              .withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                              .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+          apvts (*this, &undoManager, "FOURCOLOR", createParameterLayout())
+    {
+        apvts.state.setProperty ("selectedBand", 0, nullptr);
+        cacheParameterPointers();
+
+        //  Any parameter edit marks the current preset as modified in the UI.
+        for (auto* p : getParameters())
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p))
+                apvts.addParameterListener (ranged->getParameterID(), this);
+    }
+
+    void FourColorProcessor::cacheParameterPointers()
+    {
+        namespace p = param;
+
+        auto raw = [this] (const juce::String& id) {
+            auto* v = apvts.getRawParameterValue (id);
+            jassert (v != nullptr);
+            return v;
+        };
+
+        globalPtrs.input       = raw (p::input);
+        globalPtrs.globalDrive = raw (p::globalDrive);
+        globalPtrs.globalTone  = raw (p::globalTone);
+        globalPtrs.autoLevel   = raw (p::autoLevel);
+        globalPtrs.mix         = raw (p::mix);
+        globalPtrs.output      = raw (p::output);
+        globalPtrs.quality     = raw (p::quality);
+        globalPtrs.bypassed    = raw (p::bypassed);
+        globalPtrs.xover[0]    = raw (p::xover1);
+        globalPtrs.xover[1]    = raw (p::xover2);
+        globalPtrs.xover[2]    = raw (p::xover3);
+
+        for (int b = 0; b < numBands; ++b)
+        {
+            auto& bp   = bandPtrs[b];
+            bp.color    = raw (p::band (b, p::color));
+            bp.drive    = raw (p::band (b, p::drive));
+            bp.behavior = raw (p::band (b, p::behavior));
+            bp.tone     = raw (p::band (b, p::tone));
+            bp.space    = raw (p::band (b, p::space));
+            bp.bandMix  = raw (p::band (b, p::bandMix));
+            bp.level    = raw (p::band (b, p::level));
+            bp.solo     = raw (p::band (b, p::solo));
+            bp.mute     = raw (p::band (b, p::mute));
+            bp.bypass   = raw (p::band (b, p::bypass));
+        }
+    }
+
+    bool FourColorProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+    {
+        const auto& in  = layouts.getMainInputChannelSet();
+        const auto& out = layouts.getMainOutputChannelSet();
+
+        if (in != out)
+            return false;
+
+        return in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo();
+    }
+
+    void FourColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+    {
+        engine.prepare (sampleRate, samplesPerBlock, getTotalNumInputChannels());
+        pushParametersToEngine();
+        engine.reset();
+        setLatencySamples (engine.getLatencySamples());
+    }
+
+    void FourColorProcessor::releaseResources() {}
+
+    void FourColorProcessor::pushParametersToEngine() noexcept
+    {
+        EngineParameters ep;
+
+        ep.inputDb     = globalPtrs.input->load();
+        ep.globalDrive = globalPtrs.globalDrive->load();
+        ep.globalTone  = globalPtrs.globalTone->load();
+        ep.autoLevel   = globalPtrs.autoLevel->load() > 0.5f;
+        ep.mixPercent  = globalPtrs.mix->load();
+        ep.outputDb    = globalPtrs.output->load();
+        ep.quality     = (Quality) (int) globalPtrs.quality->load();
+        ep.bypassed    = globalPtrs.bypassed->load() > 0.5f;
+        for (int i = 0; i < 3; ++i)
+            ep.xoverHz[i] = globalPtrs.xover[i]->load();
+
+        for (int b = 0; b < numBands; ++b)
+        {
+            auto& band    = ep.bands[b];
+            const auto& q = bandPtrs[b];
+            band.color    = (ColorType) (int) q.color->load();
+            band.drive    = q.drive->load();
+            band.behavior = q.behavior->load();
+            band.tone     = q.tone->load();
+            band.space    = q.space->load();
+            band.bandMix  = q.bandMix->load();
+            band.levelDb  = q.level->load();
+            band.solo     = q.solo->load() > 0.5f;
+            band.mute     = q.mute->load() > 0.5f;
+            band.bypass   = q.bypass->load() > 0.5f;
+        }
+
+        engine.setParameters (ep);
+    }
+
+    void FourColorProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+    {
+        juce::ScopedNoDenormals noDenormals;
+
+        for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
+            buffer.clear (ch, 0, buffer.getNumSamples());
+
+        //  Stereo input meters (block peaks, lock-free). Mono runs feed both.
+        const int meterChannels = juce::jmin (2, buffer.getNumChannels());
+        for (int m = 0; m < 2; ++m)
+        {
+            const int src = juce::jmin (m, meterChannels - 1);
+            const float peak = buffer.getMagnitude (src, 0, buffer.getNumSamples());
+            if (peak > inputPeak[m].load (std::memory_order_relaxed))
+                inputPeak[m].store (peak, std::memory_order_relaxed);
+        }
+
+        pushParametersToEngine();
+        engine.process (buffer);
+
+        pushSpectrumSamples (buffer);
+
+        for (int m = 0; m < 2; ++m)
+        {
+            const int src = juce::jmin (m, meterChannels - 1);
+            const float peak = buffer.getMagnitude (src, 0, buffer.getNumSamples());
+            if (peak > outputPeak[m].load (std::memory_order_relaxed))
+                outputPeak[m].store (peak, std::memory_order_relaxed);
+        }
+
+        //  Quality changes alter the oversampler latency; JUCE forwards this
+        //  to the host asynchronously.
+        const int latency = engine.getLatencySamples();
+        if (latency != getLatencySamples())
+            setLatencySamples (latency);
+    }
+
+    // --- output spectrum tap (mid/side, lock-free, allocation-free) ------------------
+    void FourColorProcessor::pushSpectrumSamples (const juce::AudioBuffer<float>& buffer) noexcept
+    {
+        const int n = buffer.getNumSamples();
+        const int chans = juce::jmin (2, buffer.getNumChannels());
+
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        spectrumFifo.prepareToWrite (n, start1, size1, start2, size2);
+
+        auto writeRange = [&] (int start, int size, int offset)
+        {
+            for (int i = 0; i < size; ++i)
+            {
+                const float l = buffer.getSample (0, offset + i);
+                const float r = chans > 1 ? buffer.getSample (1, offset + i) : l;
+                spectrumData[(size_t) ((start + i) * 2)]     = 0.5f * (l + r);   // mid
+                spectrumData[(size_t) ((start + i) * 2 + 1)] = 0.5f * (l - r);   // side
+            }
+        };
+
+        writeRange (start1, size1, 0);
+        writeRange (start2, size2, size1);
+        spectrumFifo.finishedWrite (size1 + size2);
+    }
+
+    int FourColorProcessor::readSpectrumFrames (float* dest, int maxFrames) noexcept
+    {
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        spectrumFifo.prepareToRead (maxFrames, start1, size1, start2, size2);
+
+        for (int i = 0; i < size1; ++i)
+        {
+            dest[i * 2]     = spectrumData[(size_t) ((start1 + i) * 2)];
+            dest[i * 2 + 1] = spectrumData[(size_t) ((start1 + i) * 2 + 1)];
+        }
+        for (int i = 0; i < size2; ++i)
+        {
+            dest[(size1 + i) * 2]     = spectrumData[(size_t) ((start2 + i) * 2)];
+            dest[(size1 + i) * 2 + 1] = spectrumData[(size_t) ((start2 + i) * 2 + 1)];
+        }
+
+        spectrumFifo.finishedRead (size1 + size2);
+        return size1 + size2;
+    }
+
+    // --- preset navigation ----------------------------------------------------------
+    void FourColorProcessor::stepProgram (int delta)
+    {
+        const int count = getNumPrograms();
+        setCurrentProgram (((getCurrentProgram() + delta) % count + count) % count);
+    }
+
+    // --- A/B compare (message thread) ---------------------------------------------
+    void FourColorProcessor::toggleAB()
+    {
+        //  Store the live state into the current slot, then load the other
+        //  slot if it holds anything.
+        abSlots[abIndex].reset();
+        getStateInformation (abSlots[abIndex]);
+
+        abIndex = 1 - abIndex;
+
+        if (abSlots[abIndex].getSize() > 0)
+            setStateInformation (abSlots[abIndex].getData(), (int) abSlots[abIndex].getSize());
+    }
+
+    void FourColorProcessor::copyABToOther()
+    {
+        abSlots[1 - abIndex].reset();
+        getStateInformation (abSlots[1 - abIndex]);
+    }
+
+    juce::AudioProcessorParameter* FourColorProcessor::getBypassParameter() const
+    {
+        return apvts.getParameter (param::bypassed);
+    }
+
+    // --- programs (factory presets) ---------------------------------------------
+    int FourColorProcessor::getNumPrograms()
+    {
+        return juce::jmax (1, PresetLibrary::numPresets());
+    }
+
+    void FourColorProcessor::setCurrentProgram (int index)
+    {
+        if (index < 0 || index >= PresetLibrary::numPresets())
+            return;
+
+        currentProgram = index;
+        PresetLibrary::apply (index, apvts);
+        presetDirty.store (false);
+    }
+
+    const juce::String FourColorProcessor::getProgramName (int index)
+    {
+        if (index < 0 || index >= PresetLibrary::numPresets())
+            return "Default";
+
+        return PresetLibrary::name (index);
+    }
+
+    // --- state -------------------------------------------------------------------
+    void FourColorProcessor::getStateInformation (juce::MemoryBlock& destData)
+    {
+        auto state = apvts.copyState();
+        juce::MemoryOutputStream stream (destData, false);
+        state.writeToStream (stream);
+    }
+
+    void FourColorProcessor::setStateInformation (const void* data, int sizeInBytes)
+    {
+        auto tree = juce::ValueTree::readFromData (data, (size_t) sizeInBytes);
+
+        if (tree.isValid() && tree.hasType (apvts.state.getType()))
+            apvts.replaceState (tree);
+    }
+
+    juce::AudioProcessorEditor* FourColorProcessor::createEditor()
+    {
+        return new FourColorEditor (*this);
+    }
+}
+
+// Global JUCE plugin entry point.
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new fourcolor::FourColorProcessor();
+}
