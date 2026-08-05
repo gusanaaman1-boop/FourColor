@@ -1,11 +1,11 @@
 # FOUR COLOR — end of the 30% round
 
-**Status: not a Release Candidate, but the platform question is answered.**
-On 2026-08-05 Naaman built the source bundle on his own Windows machine and
-reports the plug-in working well — the first time the commercial target has
-been anything other than theoretical. Three items of the brief remain
-outstanding and one acceptance criterion is missed; all four are listed below
-rather than buried.
+**Status: not a Release Candidate, and the platform question is still open.**
+Windows was briefly recorded here as building and running, on the strength of
+one message. A later installer run searched the entire Windows user profile
+and found no FourColor.vst3 at all, so that claim is withdrawn: it should not
+have been written down as fact from a single sentence. Three items of the
+brief remain outstanding and one acceptance criterion is missed.
 
 Head: `fbe9e95`. 369 checks, **1 failing** (deliberately — see §5).
 
@@ -21,7 +21,7 @@ Head: `fbe9e95`. 369 checks, **1 failing** (deliberately — see §5).
 | Debug, all three | OK |
 | ASan + UBSan test build | OK, 0 findings |
 | Warnings from FOUR COLOR sources, `-Werror` on | **0**, Release and Debug |
-| **Windows** | **BUILT AND RUNNING** (2026-08-05, reported by Naaman on his own machine) |
+| **Windows** | **UNCONFIRMED.** Reported working on 2026-08-05, but an installer search of the whole user profile that evening found no FourColor.vst3 on the machine. Treat as NOT BUILT until a path to one exists. |
 
 macOS 26.3.2, Apple clang 21.0.0, CMake 4.4.0, JUCE `857aab9c`, universal
 arm64 + x86_64.

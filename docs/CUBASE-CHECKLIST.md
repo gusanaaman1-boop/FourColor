@@ -1,9 +1,9 @@
 # FOUR COLOR — Cubase 15 host validation checklist
 
-**STATUS: Windows BUILDS AND RUNS as of 2026-08-05** — Naaman built the source
-bundle on his own Windows machine and reports the plug-in working well. No row
-below has been formally recorded yet, so they all still read `[ ]`. "It works"
-is excellent news and is not the same thing as a filled-in checklist.
+**STATUS: Windows UNCONFIRMED.** It was briefly recorded here as building and
+running. A later installer run searched the whole Windows user profile and
+found no `FourColor.vst3`, so there is no evidence a Windows build exists.
+Every row below stays `[ ]`.
 
 Correcting an earlier claim in this file: **Cubase 15 is installed on this Mac**
 (`/Applications/Cubase 15.app`). What is missing is **Windows**, not Cubase. So this
