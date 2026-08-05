@@ -104,11 +104,11 @@ namespace fourcolor::dsp
     //  share one coefficient computation across channels and sections.
     struct TptSvf
     {
-        //  g = tan(pi * fc / fs), k = 1/Q. Butterworth: k = sqrt(2).
-        void setCoefficients (float g, float k) noexcept
+        //  g = tan(pi * fc / fs), damping = 1/Q. Butterworth: damping = sqrt(2).
+        void setCoefficients (float g, float damping) noexcept
         {
-            this->k = k;
-            a1 = 1.0f / (1.0f + g * (g + k));
+            k  = damping;
+            a1 = 1.0f / (1.0f + g * (g + damping));
             a2 = g * a1;
             a3 = g * a2;
         }
@@ -472,11 +472,30 @@ namespace fourcolor
 
         //  Static make-up so Drive changes colour more than loudness. Derived
         //  from each engine's memoryless curve at a -12 dBFS reference input.
+        //  The engine applies this itself, inside the dry/wet blend below, so
+        //  that Drive = 0 is exactly unity.
         float getCompensationGain() const noexcept { return compensation; }
+
+        //  0 at Drive = 0, 1 from Drive = 5% upwards. See kEngageDrive01.
+        float getEngageTarget() const noexcept { return engageTarget; }
 
         virtual ColorType type() const noexcept = 0;
 
+        //  Drive below this fraction fades the whole engine out; at and above
+        //  it the engine is fully engaged and behaves exactly as before, so no
+        //  preset with Drive > 5% is affected by the contract.
+        static constexpr float kEngageDrive01 = 0.05f;
+
     protected:
+        //  The one place the dry/wet contract is expressed. `wet` is the
+        //  engine's compensated output; at Drive 0 this returns x untouched,
+        //  bit for bit, with no residual, no gate and no DC filtering.
+        float blend (float x, float wet) noexcept
+        {
+            const float e = engageSmoothed.getNextValue();
+            return x + e * (wet * compensation - x);
+        }
+
         virtual void prepareInternals() = 0;
         virtual void resetInternals() = 0;
         virtual void driveChanged() noexcept {}
@@ -493,6 +512,11 @@ namespace fourcolor
         float d01 = 0.25f;
         float preGain = 1.0f;
         float compensation = 1.0f;
+        float engageTarget = 1.0f;
+
+        //  Smoothed per sample: a block-rate step in the blend would be an
+        //  audible click on a fast Drive automation ramp through the low end.
+        juce::SmoothedValue<float> engageSmoothed { 1.0f };
 
         static constexpr int maxChannels = 2;
 
@@ -593,12 +617,18 @@ namespace fourcolor
         rate = sampleRate;
         channelCount = juce::jlimit (1, maxChannels, numChannels);
         prepareInternals();
+
+        //  10 ms is short enough to feel instant and long enough that a jump
+        //  from Drive 0 to Drive 5 cannot step the output.
+        engageSmoothed.reset (rate, 0.010);
         setDrive (d01 * 100.0f);
+        engageSmoothed.setCurrentAndTargetValue (engageTarget);
         reset();
     }
 
     void ColorEngine::reset()
     {
+        engageSmoothed.setCurrentAndTargetValue (engageTarget);
         resetInternals();
     }
 
@@ -606,6 +636,15 @@ namespace fourcolor
     {
         d01 = juce::jlimit (0.0f, 1.0f, drivePercent * 0.01f);
         preGain = juce::Decibels::decibelsToGain (d01 * maxDriveDb());
+
+        //  Drive 0 means a clean pass-through: unity gain, no nonlinear
+        //  residual, no gate. Rather than a discontinuity at zero, the whole
+        //  engine fades in over the first 5% of the range on a smoothstep, so
+        //  the derivative is zero at both ends of that window.
+        const float t = juce::jlimit (0.0f, 1.0f, d01 / kEngageDrive01);
+        engageTarget = t * t * (3.0f - 2.0f * t);
+        engageSmoothed.setTargetValue (engageTarget);
+
         driveChanged();
         updateCompensation();
     }
@@ -613,22 +652,49 @@ namespace fourcolor
     void ColorEngine::updateCompensation() noexcept
     {
         //  Match the level of a -12 dBFS sine through the memoryless curve.
-        //  RMS-ish: sample the curve at a few points of the half cycle.
+        //
+        //  Measured over the FULL cycle, not the positive half: BITE and FUZZ
+        //  are asymmetric by design, and half-cycle sampling compensated them
+        //  by the wrong amount. The output's mean is removed before taking its
+        //  power because the signal path has a DC blocker after the shaper, so
+        //  the DC an asymmetric curve produces is not part of what is heard.
         constexpr float ref = 0.25f;
-        float inPower = 0.0f, outPower = 0.0f;
+        constexpr int numPoints = 64;
 
-        for (int i = 0; i < 16; ++i)
+        double outSum = 0.0, outSumSq = 0.0;
+
+        for (int i = 0; i < numPoints; ++i)
         {
-            const float phase = (i + 0.5f) * (juce::MathConstants<float>::pi / 16.0f);
+            const auto phase = (float) (juce::MathConstants<double>::twoPi
+                                            * ((double) i + 0.5) / numPoints);
             const float x = ref * std::sin (phase);
             const float y = staticShape (x * preGain);
-            inPower  += x * x;
-            outPower += y * y;
+
+            if (! std::isfinite (y))
+            {
+                compensation = 1.0f;      // a curve that misbehaves gets no make-up
+                return;
+            }
+
+            outSum   += y;
+            outSumSq += (double) y * y;
         }
 
-        compensation = (outPower > 1.0e-12f) ? std::sqrt (inPower / outPower) : 1.0f;
-        //  Never boost by more than 12 dB or cut by more than 24 dB.
-        compensation = juce::jlimit (0.0631f, 3.98f, compensation);
+        const double mean    = outSum / numPoints;
+        const double outPower = juce::jmax (0.0, outSumSq / numPoints - mean * mean);
+        const double inPower  = 0.5 * (double) ref * ref;   // a zero-mean sine
+
+        if (outPower < 1.0e-12)
+        {
+            compensation = 1.0f;
+            return;
+        }
+
+        const auto raw = (float) std::sqrt (inPower / outPower);
+
+        //  Never boost by more than 12 dB or cut by more than 24 dB, and never
+        //  let a denormal or a NaN reach the audio path.
+        compensation = std::isfinite (raw) ? juce::jlimit (0.0631f, 3.98f, raw) : 1.0f;
     }
 
     // --- WARM -----------------------------------------------------------------
@@ -670,15 +736,17 @@ namespace fourcolor
 
         for (int i = 0; i < n; ++i)
         {
+            const float x = data[i];
             const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
 
             //  Sag eases the drive as the (driven) level stays high, which is
-            //  the "program-dependent" part of the warmth.
-            const float level = c.sagEnv.process (std::abs (data[i] * g));
+            //  the "program-dependent" part of the warmth. It keeps tracking
+            //  even while the engine is faded out, so engaging never jumps.
+            const float level = c.sagEnv.process (std::abs (x * g));
             const float sag   = 1.0f - sagDepth * juce::jmin (1.0f, level);
 
-            const float u = data[i] * g * sag + bias;
-            data[i] = c.dc.process (rationalSoft (u) - biasOut);
+            const float u = x * g * sag + bias;
+            data[i] = blend (x, c.dc.process (rationalSoft (u) - biasOut));
         }
     }
 
@@ -727,7 +795,7 @@ namespace fourcolor
             const float y = std::tanh (v);
 
             c.lastOut = y;
-            data[i] = c.dc.process (y);
+            data[i] = blend (data[i], c.dc.process (y));
         }
     }
 
@@ -776,8 +844,9 @@ namespace fourcolor
 
         for (int i = 0; i < n; ++i)
         {
+            const float x = data[i];
             const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
-            float u = data[i] * g;
+            float u = x * g;
 
             //  Internal pre-emphasis: push the upper mids INTO the clipper...
             u += emphasis * c.preHp.processHigh (u);
@@ -788,7 +857,7 @@ namespace fourcolor
             //  is "distorted brighter" rather than just "brighter".
             y -= deemph * c.postHp.processHigh (y);
 
-            data[i] = c.dc.process (y);
+            data[i] = blend (x, c.dc.process (y));
         }
     }
 
@@ -854,7 +923,9 @@ namespace fourcolor
             v = foldOnce (foldOnce (v));
             v = juce::jlimit (-1.0f, 1.0f, v);
 
-            data[i] = c.dc.process (v * gate);
+            //  At Drive 0 the blend returns x, so the gate is inaudible there
+            //  even though its envelope keeps tracking.
+            data[i] = blend (x, c.dc.process (v * gate));
         }
     }
 
@@ -875,13 +946,23 @@ namespace fourcolor
 
 ===== FILE: Source/Dsp/NonlinearStage.h =====
 
-// One band's oversampled nonlinear section: four always-prepared colour
-// engines, four pre-allocated oversamplers (1x/2x/4x/8x), a 15 ms equal-power
-// crossfade on colour changes, and linear upsampling of the Behavior
-// modulation signal to the oversampled rate.
+// One band's oversampled nonlinear section: colour engines in two banks, four
+// pre-allocated oversamplers (1x/2x/4x/8x), a 15 ms equal-power crossfade on
+// colour changes, and linear upsampling of the Behavior modulation signal to
+// the oversampled rate.
 //
-// Everything is allocated in prepare(); quality and colour switches on the
-// audio thread only swap indices and reset pre-existing state.
+// LATENCY CONTRACT: every quality reports the SAME latency, ceil(worst case) =
+// 65 samples at any rate JUCE's equiripple oversampler is used at here. The pad
+// is applied INSIDE the oversampled domain, where it is an exact integer for
+// every factor (65x1-0=65, 65x2-98=32, 65x4-238=22, 65x8-514=6), so no
+// interpolating delay ever touches the audio. A fractional base-rate pad was
+// measured to smear transients enough to cost BODY/ATTACK 0.6 dB of separation.
+// 1x pays 65 samples it does not need; that is the price of a Quality control
+// that is safe to touch during playback.
+//
+// QUALITY SWITCH: the outgoing quality keeps running on its own engine bank
+// while the incoming one warms up, and the two are then crossfaded. Nothing is
+// reset destructively and nothing is allocated on the audio thread.
 
 #pragma once
 
@@ -900,9 +981,9 @@ namespace fourcolor
         void prepare (double baseSampleRate, int maxBlockSize, int numChannels);
         void reset();
 
-        //  Audio-thread safe: switches between pre-allocated oversamplers at a
-        //  block boundary. Returns true if the factor actually changed (the
-        //  caller must then re-align delays and re-report latency).
+        //  Audio-thread safe: begins a crossfade to another pre-allocated
+        //  oversampler. Latency does NOT change, so the caller has nothing to
+        //  re-align; the return value only says whether a fade started.
         bool setQuality (Quality q) noexcept;
 
         //  Audio-thread safe: starts the colour crossfade if the type changed.
@@ -915,37 +996,77 @@ namespace fourcolor
         void process (juce::AudioBuffer<float>& buffer,
                       const float* behaviorMod[2] = nullptr) noexcept;
 
-        //  Wet-path latency at the base rate for the CURRENT quality (fractional).
-        float getLatencySamples() const noexcept;
+        //  Wet-path latency at the base rate. CONSTANT across all qualities,
+        //  and an exact integer.
+        float getLatencySamples() const noexcept { return reportedLatency; }
 
-        //  Worst-case latency across all qualities, for sizing alignment delays.
-        float getMaxLatencySamples() const noexcept { return maxLatency; }
+        //  Same number; kept for the callers that size their delay lines by it.
+        float getMaxLatencySamples() const noexcept { return reportedLatency; }
+
+        //  One oversampler's own latency, before padding. Diagnostics only.
+        float getRawLatencySamples (Quality q) const noexcept
+        {
+            const int i = juce::jlimit (0, 3, (int) q);
+            return oversamplers[i] != nullptr
+                       ? (float) oversamplers[i]->getLatencyInSamples() : 0.0f;
+        }
 
         //  Applied internally by process(); exposed for the tests.
         float getCompensationGain() const noexcept
         {
-            return engines[(size_t) activeColor]->getCompensationGain();
+            return engines[activeBank][(size_t) activeColor]->getCompensationGain();
         }
 
         ColorType getColor() const noexcept { return activeColor; }
+        bool isSwitchingQuality() const noexcept { return qualityFadeLeft > 0; }
 
     private:
+        //  Runs `buffer` through one quality's oversampler, its engine bank and
+        //  that path's latency pad. `colourFadeLeft` is passed in so two paths
+        //  running in the same block see the same colour-fade position.
+        void processPath (int qualityIndex, int bankIndex,
+                          juce::AudioBuffer<float>& buffer, int numSamples,
+                          const float* const* mod, int colourFadeLeft) noexcept;
+
+        void armBank (int bankIndex, int qualityIndex) noexcept;
+
         double baseRate = 48000.0;
         int maxBlock = 0;
         int channels = 2;
-        float maxLatency = 0.0f;
+        float maxLatency = 0.0f;        // worst raw oversampler latency
+        float reportedLatency = 0.0f;   // ceil(maxLatency): what every path delivers
 
-        std::unique_ptr<ColorEngine> engines[4];         // per ColorType, at 8x readiness
+        //  Two banks, so the outgoing quality keeps its warm state while the
+        //  incoming one runs alongside it. [bank][ColorType]
+        std::unique_ptr<ColorEngine> engines[2][4];
         std::unique_ptr<juce::dsp::Oversampling<float>> oversamplers[4];   // per Quality
+
+        //  Per-bank pad bringing that path up to reportedLatency, applied in
+        //  the oversampled domain where it is always a whole number of samples.
+        //  Interpolation type None: this must not filter or smear anything.
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> padDelay[2];
+        int padOsSamples[2] = { 0, 0 };
+
+        int activeBank = 0;
         int activeQuality = (int) Quality::high;
+        int outgoingQuality = (int) Quality::high;
+        int pendingQuality = -1;          // requested while a fade was already running
 
         ColorType activeColor = ColorType::warm;
         ColorType fadingFrom  = ColorType::warm;
-        int fadeSamplesLeft = 0;      // at base rate
+        int fadeSamplesLeft = 0;          // colour fade, at base rate
         int fadeLengthSamples = 1;
 
-        juce::AudioBuffer<float> fadeScratch;    // oversampled copy for the outgoing colour
-        juce::AudioBuffer<float> modScratch;     // oversampled behavior modulation
+        //  Quality fade: a pre-roll during which the incoming path runs at zero
+        //  weight while its oversampler, pad and engines fill, then the fade.
+        int qualityFadeLeft = 0;
+        int qualityFadeTotal = 1;
+        int qualityFadeLength = 1;
+        int qualityPreRoll = 0;
+
+        juce::AudioBuffer<float> fadeScratch;      // oversampled copy, outgoing colour
+        juce::AudioBuffer<float> modScratch;       // oversampled behavior modulation
+        juce::AudioBuffer<float> qualityScratch;   // base-rate copy, outgoing quality
         float drivePercent = 25.0f;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NonlinearStage)
@@ -979,25 +1100,76 @@ namespace fourcolor
             maxLatency = juce::jmax (maxLatency, (float) oversamplers[q]->getLatencyInSamples());
         }
 
-        //  Engines are prepared for the highest oversampled rate they might see;
-        //  time constants are recomputed on every quality switch below, so
-        //  prepare each engine for the CURRENT factor at switch time instead.
-        for (int e = 0; e < 4; ++e)
+        //  Two engine banks. Both are created here; a quality switch only ever
+        //  recomputes coefficients on one of them.
+        for (int bank = 0; bank < 2; ++bank)
+            for (int e = 0; e < 4; ++e)
+                engines[bank][e] = createColorEngine ((ColorType) e);
+
+        //  The common target: an integer, which is what makes every pad an
+        //  exact whole number of OVERSAMPLED samples (see the header).
+        reportedLatency = std::ceil (maxLatency);
+
+        //  Worst pad in oversampled samples is 1x's, which is reportedLatency.
+        juce::dsp::ProcessSpec spec { baseRate, (juce::uint32) (maxBlock * 8),
+                                      (juce::uint32) channels };
+        for (auto& pad : padDelay)
         {
-            engines[e] = createColorEngine ((ColorType) e);
-            engines[e]->prepare (baseRate * oversamplers[activeQuality]->getOversamplingFactor(),
-                                 channels);
+            pad.setMaximumDelayInSamples ((int) reportedLatency + 4);
+            pad.prepare (spec);
         }
 
         //  Both scratch buffers live in the oversampled domain: 8x worst case.
         fadeScratch.setSize (channels, maxBlock * 8);
         modScratch.setSize (channels, maxBlock * 8);
+        qualityScratch.setSize (channels, maxBlock);
 
         fadeLengthSamples = juce::jmax (1, (int) (0.015 * baseRate));
+
+        //  The quality fade is deliberately twice the colour fade. Crossfading
+        //  1x against 8x means crossfading two genuinely different signals -
+        //  one aliases, one does not - so the slower the blend, the smaller the
+        //  instantaneous difference. A Quality change is a structural switch,
+        //  not a musical gesture; 30 ms is imperceptible.
+        qualityFadeLength = juce::jmax (1, (int) (0.030 * baseRate));
+
+        //  The incoming path needs its oversampler, its pad and its engines to
+        //  fill before it is worth listening to. maxLatency samples covers all
+        //  three, because pad + own latency == maxLatency by construction.
+        qualityPreRoll = (int) std::ceil (maxLatency) + 1;
+
+        activeBank = 0;
+        qualityFadeLeft = 0;
+        pendingQuality = -1;
         fadeSamplesLeft = 0;
 
+        armBank (activeBank, activeQuality);
         setDrive (drivePercent);
         reset();
+    }
+
+    //  Points a bank's engines at a quality's oversampled rate and sets that
+    //  bank's pad so the path totals maxLatency. Coefficient work only - no
+    //  allocation, safe on the audio thread.
+    void NonlinearStage::armBank (int bankIndex, int qualityIndex) noexcept
+    {
+        const double engineRate = baseRate
+                                * (double) oversamplers[qualityIndex]->getOversamplingFactor();
+
+        for (auto& e : engines[bankIndex])
+        {
+            e->prepare (engineRate, channels);
+            e->setDrive (drivePercent);
+        }
+
+        //  In the oversampled domain the pad is exact: the oversampler's own
+        //  latency times its factor is always a whole number of samples, and
+        //  so is reportedLatency times its factor, because both are integers.
+        const int factor = (int) oversamplers[qualityIndex]->getOversamplingFactor();
+        const auto ownOs = (int) std::llround (oversamplers[qualityIndex]->getLatencyInSamples()
+                                                   * (double) factor);
+        padOsSamples[bankIndex] = juce::jmax (0, (int) reportedLatency * factor - ownOs);
+        padDelay[bankIndex].setDelay ((float) padOsSamples[bankIndex]);
     }
 
     void NonlinearStage::reset()
@@ -1006,28 +1178,47 @@ namespace fourcolor
             if (os != nullptr)
                 os->reset();
 
-        for (auto& e : engines)
-            if (e != nullptr)
-                e->reset();
+        for (auto& bank : engines)
+            for (auto& e : bank)
+                if (e != nullptr)
+                    e->reset();
+
+        for (auto& pad : padDelay)
+            pad.reset();
 
         fadeSamplesLeft = 0;
+        qualityFadeLeft = 0;
+        pendingQuality = -1;
     }
 
     bool NonlinearStage::setQuality (Quality q) noexcept
     {
         const int index = juce::jlimit (0, 3, (int) q);
+
+        if (qualityFadeLeft > 0)
+        {
+            //  Already crossfading. Remember the request instead of tearing
+            //  down a fade that is halfway through.
+            pendingQuality = (index == activeQuality) ? -1 : index;
+            return false;
+        }
+
         if (index == activeQuality)
             return false;
 
+        outgoingQuality = activeQuality;
         activeQuality = index;
+
+        //  The outgoing bank keeps its warm state; the incoming bank is armed
+        //  for the new rate and starts from a clean slate, which is what the
+        //  pre-roll and the fade are for.
+        activeBank = 1 - activeBank;
+        armBank (activeBank, activeQuality);
+        padDelay[activeBank].reset();
         oversamplers[activeQuality]->reset();
 
-        //  Re-derive engine time constants for the new engine-side rate.
-        //  ColorEngine::prepare only computes coefficients - no allocation.
-        const double engineRate = baseRate * oversamplers[activeQuality]->getOversamplingFactor();
-        for (auto& e : engines)
-            e->prepare (engineRate, channels);
-
+        qualityFadeTotal = qualityPreRoll + qualityFadeLength;
+        qualityFadeLeft = qualityFadeTotal;
         return true;
     }
 
@@ -1039,20 +1230,88 @@ namespace fourcolor
         fadingFrom = activeColor;
         activeColor = type;
         fadeSamplesLeft = fadeLengthSamples;
-        engines[(size_t) activeColor]->setDrive (drivePercent);
+
+        for (auto& bank : engines)
+            bank[(size_t) activeColor]->setDrive (drivePercent);
     }
 
     void NonlinearStage::setDrive (float newDrivePercent) noexcept
     {
         drivePercent = newDrivePercent;
-        for (auto& e : engines)
-            if (e != nullptr)
-                e->setDrive (drivePercent);
+        for (auto& bank : engines)
+            for (auto& e : bank)
+                if (e != nullptr)
+                    e->setDrive (drivePercent);
     }
 
-    float NonlinearStage::getLatencySamples() const noexcept
+    void NonlinearStage::processPath (int qualityIndex, int bankIndex,
+                                      juce::AudioBuffer<float>& buffer, int n,
+                                      const float* const* mod, int colourFadeLeft) noexcept
     {
-        return (float) oversamplers[activeQuality]->getLatencyInSamples();
+        auto& os = *oversamplers[qualityIndex];
+        const int factor = (int) os.getOversamplingFactor();
+
+        juce::dsp::AudioBlock<float> baseBlock (buffer.getArrayOfWritePointers(),
+                                                (size_t) buffer.getNumChannels(), (size_t) n);
+        auto osBlock = os.processSamplesUp (baseBlock);
+        const int osSamples = (int) osBlock.getNumSamples();
+        const int chans = (int) osBlock.getNumChannels();
+
+        auto& incoming = *engines[bankIndex][(size_t) activeColor];
+
+        if (colourFadeLeft <= 0)
+        {
+            for (int c = 0; c < chans; ++c)
+                incoming.processBlock (osBlock.getChannelPointer ((size_t) c),
+                                       osSamples, c, mod[c]);
+        }
+        else
+        {
+            //  Equal-power crossfade in the oversampled domain: outgoing engine
+            //  on a copy, incoming on the block, blended per sample.
+            auto& outgoing = *engines[bankIndex][(size_t) fadingFrom];
+            const int fadeLenOs = fadeLengthSamples * factor;
+            const int leftAtStart = colourFadeLeft * factor;
+
+            for (int c = 0; c < chans; ++c)
+            {
+                auto* d = osBlock.getChannelPointer ((size_t) c);
+                auto* s = fadeScratch.getWritePointer (c);
+                juce::FloatVectorOperations::copy (s, d, osSamples);
+
+                incoming.processBlock (d, osSamples, c, mod[c]);
+                outgoing.processBlock (s, osSamples, c, mod[c]);
+
+                int left = leftAtStart;
+                for (int i = 0; i < osSamples && left > 0; ++i)
+                {
+                    const float t = 1.0f - (float) left / (float) fadeLenOs;   // 0 -> 1
+                    const float a = std::sin (t * juce::MathConstants<float>::halfPi);
+                    const float b = std::cos (t * juce::MathConstants<float>::halfPi);
+                    d[i] = a * d[i] + b * s[i];
+                    --left;
+                }
+            }
+        }
+
+        //  Pad this path up to the common latency, BEFORE downsampling: here
+        //  the pad is a whole number of samples for every factor, so it is a
+        //  pure delay with no interpolation and no filtering.
+        if (padOsSamples[bankIndex] > 0)
+        {
+            auto& pad = padDelay[bankIndex];
+            for (int c = 0; c < chans; ++c)
+            {
+                auto* d = osBlock.getChannelPointer ((size_t) c);
+                for (int i = 0; i < osSamples; ++i)
+                {
+                    pad.pushSample (c, d[i]);
+                    d[i] = pad.popSample (c);
+                }
+            }
+        }
+
+        os.processSamplesDown (baseBlock);
     }
 
     void NonlinearStage::process (juce::AudioBuffer<float>& buffer,
@@ -1062,26 +1321,25 @@ namespace fourcolor
         if (n == 0)
             return;
 
-        auto& os = *oversamplers[activeQuality];
-        const int factor = (int) os.getOversamplingFactor();
+        const int chans = juce::jmin (channels, buffer.getNumChannels());
 
-        //  Upsample ONCE; engines and the colour crossfade all run in the
-        //  oversampled domain, so both fade legs share the same latency and
-        //  the same anti-aliasing.
-        juce::dsp::AudioBlock<float> baseBlock (buffer.getArrayOfWritePointers(),
-                                                (size_t) buffer.getNumChannels(), (size_t) n);
-        auto osBlock = os.processSamplesUp (baseBlock);
-        const int osSamples = (int) osBlock.getNumSamples();
-        const int chans = (int) osBlock.getNumChannels();
-
-        //  Upsample the (smooth, low-frequency) Behavior modulation linearly.
+        //  Upsample the (smooth, low-frequency) Behavior modulation linearly,
+        //  at the ACTIVE factor. During a quality fade the outgoing path uses
+        //  the same curve resampled to its own factor.
         const float* mod[2] = { nullptr, nullptr };
-        if (behaviorMod != nullptr)
+        auto buildMod = [&] (int factor)
         {
+            if (behaviorMod == nullptr)
+                return;
+
+            const int osSamples = n * factor;
             for (int c = 0; c < chans; ++c)
             {
                 if (behaviorMod[c] == nullptr)
+                {
+                    mod[c] = nullptr;
                     continue;
+                }
 
                 auto* m = modScratch.getWritePointer (c);
                 const float* src = behaviorMod[c];
@@ -1096,62 +1354,77 @@ namespace fourcolor
                 }
                 mod[c] = m;
             }
-        }
+        };
 
-        auto& incoming = *engines[(size_t) activeColor];
-        const float compIn = incoming.getCompensationGain();
+        const int colourFadeAtStart = fadeSamplesLeft;
 
-        if (fadeSamplesLeft <= 0)
+        if (qualityFadeLeft <= 0)
         {
-            for (int c = 0; c < chans; ++c)
-            {
-                auto* d = osBlock.getChannelPointer ((size_t) c);
-                incoming.processBlock (d, osSamples, c, mod[c]);
-
-                //  Static make-up so Drive changes colour more than loudness.
-                juce::FloatVectorOperations::multiply (d, compIn, osSamples);
-            }
+            buildMod ((int) oversamplers[activeQuality]->getOversamplingFactor());
+            processPath (activeQuality, activeBank, buffer, n, mod, colourFadeAtStart);
         }
         else
         {
-            //  Equal-power crossfade in the oversampled domain: outgoing engine
-            //  on a copy, incoming on the block, blended per sample.
-            auto& outgoing = *engines[(size_t) fadingFrom];
-            const float compOut = outgoing.getCompensationGain();
-            const int fadeLenOs = fadeLengthSamples * factor;
-            const int leftAtStart = fadeSamplesLeft * factor;
+            const int outgoingBank = 1 - activeBank;
 
-            for (int c = 0; c < chans; ++c)
+            //  Outgoing path on a copy of the input. qualityScratch was sized
+            //  in prepare(); nothing is resized on the audio thread.
+            for (int c = 0; c < buffer.getNumChannels(); ++c)
+                juce::FloatVectorOperations::copy (qualityScratch.getWritePointer (c),
+                                                   buffer.getReadPointer (c), n);
+
+            buildMod ((int) oversamplers[outgoingQuality]->getOversamplingFactor());
+            processPath (outgoingQuality, outgoingBank, qualityScratch, n, mod, colourFadeAtStart);
+
+            //  ...the incoming path on the block itself.
+            buildMod ((int) oversamplers[activeQuality]->getOversamplingFactor());
+            processPath (activeQuality, activeBank, buffer, n, mod, colourFadeAtStart);
+
+            //  Equal-power blend, after a pre-roll that lets the incoming path
+            //  fill its oversampler, pad and engine state at zero weight.
+            for (int c = 0; c < buffer.getNumChannels(); ++c)
             {
-                auto* d = osBlock.getChannelPointer ((size_t) c);
-                auto* s = fadeScratch.getWritePointer (c);
-                juce::FloatVectorOperations::copy (s, d, osSamples);
+                auto* d = buffer.getWritePointer (c);
+                const auto* s = qualityScratch.getReadPointer (c);
 
-                incoming.processBlock (d, osSamples, c, mod[c]);
-                outgoing.processBlock (s, osSamples, c, mod[c]);
-
-                int left = leftAtStart;
-                for (int i = 0; i < osSamples; ++i)
+                int left = qualityFadeLeft;
+                for (int i = 0; i < n; ++i)
                 {
-                    if (left > 0)
+                    float w = 0.0f;
+                    if (left <= 0)
                     {
-                        const float t = 1.0f - (float) left / (float) fadeLenOs;   // 0 -> 1
-                        const float a = std::sin (t * juce::MathConstants<float>::halfPi);
-                        const float b = std::cos (t * juce::MathConstants<float>::halfPi);
-                        d[i] = a * d[i] * compIn + b * s[i] * compOut;
-                        --left;
+                        w = 1.0f;
                     }
                     else
                     {
-                        d[i] *= compIn;
+                        const int elapsed = qualityFadeTotal - left;
+                        if (elapsed >= qualityPreRoll)
+                        {
+                            const float t = (float) (elapsed - qualityPreRoll)
+                                          / (float) qualityFadeLength;
+                            w = std::sin (juce::jlimit (0.0f, 1.0f, t)
+                                              * juce::MathConstants<float>::halfPi);
+                        }
+                        --left;
                     }
+
+                    const float wOut = std::sqrt (juce::jmax (0.0f, 1.0f - w * w));
+                    d[i] = w * d[i] + wOut * s[i];
                 }
             }
 
-            fadeSamplesLeft = juce::jmax (0, fadeSamplesLeft - n);
+            qualityFadeLeft = juce::jmax (0, qualityFadeLeft - n);
+
+            if (qualityFadeLeft == 0 && pendingQuality >= 0)
+            {
+                const int next = pendingQuality;
+                pendingQuality = -1;
+                setQuality ((Quality) next);
+            }
         }
 
-        os.processSamplesDown (baseBlock);
+        if (fadeSamplesLeft > 0)
+            fadeSamplesLeft = juce::jmax (0, fadeSamplesLeft - n);
     }
 }
 
@@ -1870,6 +2143,7 @@ namespace fourcolor
         void process (juce::AudioBuffer<float>& buffer) noexcept;
 
         float getLatencySamples() const noexcept { return nonlinear.getLatencySamples(); }
+        float getRawLatencySamples (Quality q) const noexcept { return nonlinear.getRawLatencySamples (q); }
 
         //  Block peak of this band's OUTPUT (post mix/level/mute), for the UI
         //  band meters. Lock-free; the reader exchanges it back to zero.
@@ -1991,13 +2265,10 @@ namespace fourcolor
 
     bool BandProcessor::setQuality (Quality q) noexcept
     {
-        const bool changed = nonlinear.setQuality (q);
-        if (changed)
-        {
-            cleanDelay.reset();
-            updateCleanDelay();
-        }
-        return changed;
+        //  Since Phase 12 every quality reports the same latency, so the clean
+        //  delay is already correct and must NOT be reset - clearing it here
+        //  was a dropout on the clean leg every time Quality was touched.
+        return nonlinear.setQuality (q);
     }
 
     void BandProcessor::process (juce::AudioBuffer<float>& buffer) noexcept
@@ -2316,10 +2587,9 @@ namespace fourcolor
             std::sqrt (f2 * f3),    std::sqrt (f3 * 16000.0f)
         };
 
-        bool qualityChanged = false;
         for (int b = 0; b < numBands; ++b)
         {
-            qualityChanged = bands[b].setQuality (p.quality) || qualityChanged;
+            bands[b].setQuality (p.quality);
 
             //  Global Drive scales the four RELATIVE band drives around their
             //  values: 50 is neutral, 0 silences the drive, 100 doubles it.
@@ -2340,14 +2610,10 @@ namespace fourcolor
             bands[b].setSettings (s);
         }
 
-        if (qualityChanged)
-        {
-            //  New oversampler latency: realign both compensation delays. The
-            //  host is told through getLatencySamples() by the processor.
-            dryDelay.reset();
-            wetAlign.reset();
-            updateLatency();
-        }
+        //  No latency bookkeeping on a Quality change: NonlinearStage pads every
+        //  quality to the same latency, so dryDelay, mixDryDelay and wetAlign
+        //  are already correct. Resetting them here used to punch a hole in the
+        //  dry and bypass legs each time Quality moved.
     }
 
     void FourColorEngine::process (juce::AudioBuffer<float>& buffer) noexcept
@@ -2871,11 +3137,9 @@ namespace fourcolor
                 outputPeak[m].store (peak, std::memory_order_relaxed);
         }
 
-        //  Quality changes alter the oversampler latency; JUCE forwards this
-        //  to the host asynchronously.
-        const int latency = engine.getLatencySamples();
-        if (latency != getLatencySamples())
-            setLatencySamples (latency);
+        //  Latency is a constant of the design and was reported in
+        //  prepareToPlay. Telling a host about a new latency while the
+        //  transport is running is exactly what Phase 12 set out to stop.
     }
 
     // --- output spectrum tap (mid/side, lock-free, allocation-free) ------------------

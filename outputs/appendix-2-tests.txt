@@ -109,6 +109,20 @@ namespace
         }
     }
 
+    //  Performance assertions. A CPU number measured in an unoptimised Debug
+    //  build says nothing about the shipped plug-in - it is routinely 5x slower
+    //  - so Debug reports the measurement and does not judge it. Lowering the
+    //  Release thresholds to accommodate Debug would be tuning a test to pass.
+    void checkPerformance ([[maybe_unused]] bool condition, const String& what)
+    {
+       #if JUCE_DEBUG
+        ++checksRun;
+        std::printf ("  --  %s   [performance check skipped: Debug build]\n", what.toRawUTF8());
+       #else
+        check (condition, what);
+       #endif
+    }
+
     void checkNear (double measured, double expected, double tolerance, const String& what)
     {
         check (std::abs (measured - expected) <= tolerance,
@@ -144,7 +158,7 @@ namespace
         return peak;
     }
 
-    double rmsOf (const AudioBuffer<float>& b, int channel = 0)
+    [[maybe_unused]] double rmsOf (const AudioBuffer<float>& b, int channel = 0)
     {
         return b.getRMSLevel (channel, 0, b.getNumSamples());
     }
@@ -161,7 +175,7 @@ namespace
         return true;
     }
 
-    double dcOf (const AudioBuffer<float>& b, int channel = 0)
+    [[maybe_unused]] double dcOf (const AudioBuffer<float>& b, int channel = 0)
     {
         double sum = 0.0;
         auto* d = b.getReadPointer (channel);
@@ -978,13 +992,22 @@ static void testColorSwitchAndLatency()
     NonlinearStage stage;
     stage.prepare (sr, 512, 1);
 
+    //  Phase 12 contract: the reported latency is the SAME for every quality.
+    //  Each oversampler's own latency is padded up to the worst case.
+    const float reported = stage.getLatencySamples();
+    for (int q = 0; q < 4; ++q)
+    {
+        const float raw = stage.getRawLatencySamples ((Quality) q);
+        std::printf ("      quality %dx: oversampler %.3f + pad %.3f = %.3f samples\n",
+                     1 << q, raw, reported - raw, reported);
+    }
+
     for (int q = 0; q < 4; ++q)
     {
         stage.setQuality ((Quality) q);
-        std::printf ("      quality %dx latency: %.2f samples\n", 1 << q, stage.getLatencySamples());
-        check (q == 0 ? stage.getLatencySamples() == 0.0f
-                      : stage.getLatencySamples() > 0.0f,
-               "latency reported for quality " + String (1 << q) + "x");
+        check (stage.getLatencySamples() == reported,
+               "quality " + String (1 << q) + "x reports the same latency ("
+                   + String (stage.getLatencySamples(), 3) + ")");
     }
 
     //  Switch colour mid-playback. A hard-driven engine legitimately outputs
@@ -1319,10 +1342,201 @@ static void testQualitySwitchDuringPlayback()
     }
 
     check (finite, "output stays finite through quality switches");
-    check (latencies[0] == 0, "draft (1x) reports zero latency");
-    check (latencies[1] > 0 && latencies[2] > latencies[1] && latencies[3] > latencies[2],
-           "latency grows with quality (" + String (latencies[0]) + "/" + String (latencies[1])
-               + "/" + String (latencies[2]) + "/" + String (latencies[3]) + " smp)");
+
+    //  Phase 12 replaced "latency grows with quality" with the opposite
+    //  promise: it never moves, so a host is never handed a new number while
+    //  the transport is running.
+    check (latencies[0] == 65 && latencies[1] == 65 && latencies[2] == 65 && latencies[3] == 65,
+           "latency is 65 samples in every quality (" + String (latencies[0]) + "/"
+               + String (latencies[1]) + "/" + String (latencies[2]) + "/"
+               + String (latencies[3]) + " smp)");
+}
+
+// ================================================================================
+//  Phase 12: switching Quality during playback
+// ================================================================================
+static void testQualitySwitchIsSeamless()
+{
+    section ("Phase 12: Quality switches are click-free and time-invariant");
+
+    const double sr = 48000.0;
+    const int block = 128;
+
+    //  Three programme types, because a discontinuity hides in different places
+    //  in each: a tone shows steps, noise shows dropouts, a transient train
+    //  shows smearing.
+    enum class Material { sine, pinkish, transients };
+    const char* materialNames[] = { "sine", "pink-ish noise", "transient train" };
+
+    auto fill = [] (AudioBuffer<float>& buf, Material m, int startSample, Random& rng,
+                    float& pinkState)
+    {
+        for (int i = 0; i < buf.getNumSamples(); ++i)
+        {
+            const int s = startSample + i;
+            float v = 0.0f;
+
+            switch (m)
+            {
+                case Material::sine:
+                    v = 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * s / 48000.0);
+                    break;
+                case Material::pinkish:
+                    //  One-pole lowpassed white: broadband but not full-scale HF.
+                    pinkState += 0.12f * (rng.nextFloat() * 2.0f - 1.0f - pinkState);
+                    v = 0.9f * pinkState;
+                    break;
+                case Material::transients:
+                {
+                    const double phase = std::fmod ((double) s / 48000.0, 0.125);
+                    v = 0.6f * (float) (std::exp (-phase * 40.0)
+                                        * std::sin (2.0 * MathConstants<double>::pi * 90.0 * phase));
+                    break;
+                }
+            }
+
+            for (int c = 0; c < buf.getNumChannels(); ++c)
+                buf.setSample (c, i, v);
+        }
+    };
+
+    //  Envelope continuity, in dB between adjacent 32-sample windows. A click
+    //  or a dropout shows up here whatever the material is, and the number is
+    //  compared against the same measurement taken far from the switch, so the
+    //  material's own liveliness cancels out. A raw "max sample step" budget
+    //  only means something for smooth material - pink noise's own steps are
+    //  0.3 FS, which is fifteen times the 0.02 FS budget.
+    auto worstEnvelopeJumpDb = [] (const std::vector<float>& x, size_t first, size_t last)
+    {
+        constexpr size_t win = 32;
+        double worst = 0.0, prev = -1.0;
+
+        for (size_t w = first; w + win <= last; w += win)
+        {
+            double sumSq = 0.0;
+            for (size_t i = 0; i < win; ++i)
+                sumSq += (double) x[w + i] * x[w + i];
+            const double rms = std::sqrt (sumSq / (double) win) + 1.0e-9;
+
+            if (prev > 0.0)
+                worst = jmax (worst, std::abs (20.0 * std::log10 (rms / prev)));
+            prev = rms;
+        }
+        return worst;
+    };
+
+    const int switchBlock = 60, keptFromBlock = 20;
+    const size_t switchSample = (size_t) ((switchBlock - keptFromBlock) * block);
+
+    for (int m = 0; m < 3; ++m)
+    {
+        double worstStep = 0.0, baselineStep = 0.0, worstExcessDb = 0.0, worstPreSwitchDiff = 0.0;
+        int longestSilentRun = 0;
+
+        //  Every ordered pair of qualities.
+        for (int from = 0; from < 4; ++from)
+        {
+            for (int to = 0; to < 4; ++to)
+            {
+                if (from == to)
+                    continue;
+
+                //  Two renders of the same input: one that switches, one that
+                //  never does. Everything before the switch must be identical.
+                std::vector<float> out[2];
+
+                for (int variant = 0; variant < 2; ++variant)
+                {
+                    FourColorEngine engine;
+                    engine.prepare (sr, block, 2);
+
+                    EngineParameters p;
+                    p.autoLevel = false;
+                    p.quality = (Quality) from;
+                    for (auto& b : p.bands)
+                        b.drive = 45.0f;
+                    engine.setParameters (p);
+
+                    AudioBuffer<float> io (2, block);
+                    Random rng (1234);
+                    float pinkState = 0.0f;
+                    int s = 0;
+
+                    for (int blk = 0; blk < 140; ++blk)
+                    {
+                        if (variant == 1 && blk == switchBlock)
+                        {
+                            p.quality = (Quality) to;
+                            engine.setParameters (p);
+                        }
+
+                        fill (io, (Material) m, s, rng, pinkState);
+                        s += block;
+                        engine.process (io);
+
+                        if (blk >= keptFromBlock)
+                            for (int i = 0; i < block; ++i)
+                                out[variant].push_back (io.getSample (0, i));
+                    }
+                }
+
+                //  1. Nothing before the switch may change.
+                for (size_t i = 0; i < switchSample; ++i)
+                    worstPreSwitchDiff = jmax (worstPreSwitchDiff,
+                                               std::abs ((double) out[1][i] - out[0][i]));
+
+                //  2. Envelope continuity across the switch, against the same
+                //     measurement on quiet ground well before it.
+                const double baselineDb = worstEnvelopeJumpDb (out[1], 0, switchSample - block);
+                const double switchDb = worstEnvelopeJumpDb (out[1], switchSample - block,
+                                                             switchSample + 4 * (size_t) block);
+                worstExcessDb = jmax (worstExcessDb, switchDb - baselineDb);
+
+                //  3. Raw step and dropout length, reported for every material
+                //     and asserted only where the budget is meaningful.
+                int silentRun = 0;
+                for (size_t i = switchSample - (size_t) block;
+                     i < switchSample + 4 * (size_t) block; ++i)
+                {
+                    worstStep = jmax (worstStep, std::abs ((double) out[1][i] - out[1][i - 1]));
+                    if (std::abs (out[1][i]) < 1.0e-7f)
+                    { ++silentRun; longestSilentRun = jmax (longestSilentRun, silentRun); }
+                    else silentRun = 0;
+                }
+
+                //  The same measure taken well away from the switch, so the
+                //  number above can be read as "signal" or "click".
+                for (size_t i = (size_t) block + 1; i < switchSample - (size_t) block; ++i)
+                    baselineStep = jmax (baselineStep, std::abs ((double) out[1][i] - out[1][i - 1]));
+            }
+        }
+
+        std::printf ("      %-16s pre-switch diff %.9f, envelope excess %+.2f dB,"
+                     " step %.5f FS (same material away from the switch: %.5f), silent run %d\n",
+                     materialNames[m], worstPreSwitchDiff, worstExcessDb,
+                     worstStep, baselineStep, longestSilentRun);
+
+        check (worstPreSwitchDiff == 0.0,
+               String (materialNames[m])
+                   + ": a Quality change alters nothing before it happens (diff "
+                   + String (worstPreSwitchDiff, 9) + ")");
+
+        check (worstExcessDb < 1.0,
+               String (materialNames[m])
+                   + ": the switch adds no envelope discontinuity beyond the material's own ("
+                   + String (worstExcessDb, 2) + " dB)");
+
+        check (longestSilentRun <= 1,
+               String (materialNames[m]) + ": no dropout longer than one sample ("
+                   + String (longestSilentRun) + ")");
+
+        //  The spec's 0.02 FS budget, applied where a sample step is a
+        //  meaningful measure at all.
+        if (m != 1)
+            check (worstStep < 0.02,
+                   String (materialNames[m]) + ": no switch steps more than 0.02 FS ("
+                       + String (worstStep, 5) + ")");
+    }
 }
 
 // ================================================================================
@@ -1844,6 +2058,213 @@ namespace
     }
 }
 
+// ================================================================================
+//  Phase 11: Drive 0 is a clean pass-through
+// ================================================================================
+namespace
+{
+    const char* const engineNames[] = { "WARM", "IRON", "BITE", "FUZZ" };
+
+    //  Renders `seconds` of a sine through a fully configured engine and hands
+    //  back the settled tail.
+    std::vector<float> renderSine (const EngineParameters& p, double freq,
+                                   float amplitude, double sr, int block,
+                                   int settleSamples, int measureSamples)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+        engine.setParameters (p);
+
+        std::vector<float> out;
+        out.reserve ((size_t) (settleSamples + measureSamples));
+
+        AudioBuffer<float> io (1, block);
+        int s = 0;
+        while ((int) out.size() < settleSamples + measureSamples)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++s)
+                d[i] = amplitude * (float) std::sin (2.0 * MathConstants<double>::pi * freq * s / sr);
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            for (int i = 0; i < block; ++i)
+                out.push_back (io.getSample (0, i));
+        }
+
+        out.erase (out.begin(), out.begin() + settleSamples);
+        out.resize ((size_t) measureSamples);
+        return out;
+    }
+
+    //  THD+N of a single-tone render: everything that is not the fundamental,
+    //  as dB relative to the total. The fundamental is removed by subtracting
+    //  its least-squares sine/cosine projection, which needs no window.
+    double thdPlusNoiseDb (const std::vector<float>& x, double freq, double sr)
+    {
+        const auto n = (double) x.size();
+        double sumSin = 0.0, sumCos = 0.0;
+
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double w = 2.0 * MathConstants<double>::pi * freq * (double) i / sr;
+            sumSin += x[i] * std::sin (w);
+            sumCos += x[i] * std::cos (w);
+        }
+
+        const double a = 2.0 * sumSin / n, b = 2.0 * sumCos / n;
+
+        double totalSq = 0.0, residualSq = 0.0;
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double w = 2.0 * MathConstants<double>::pi * freq * (double) i / sr;
+            const double fundamental = a * std::sin (w) + b * std::cos (w);
+            const double r = x[i] - fundamental;
+            totalSq    += (double) x[i] * x[i];
+            residualSq += r * r;
+        }
+
+        if (totalSq <= 0.0)
+            return -200.0;
+
+        return 10.0 * std::log10 (jmax (1.0e-30, residualSq / totalSq));
+    }
+}
+
+static void testDriveZeroIsClean()
+{
+    section ("Phase 11: Drive 0 is a clean pass-through in every engine and band");
+
+    const double sr = 48000.0;
+    const int block = 512;
+
+    //  One probe frequency well inside each band, with the default crossovers
+    //  at 120 Hz / 700 Hz / 4.5 kHz.
+    struct Probe { const char* band; double freq; };
+    const Probe probes[] = { { "LOW", 60.0 }, { "LOW MID", 300.0 },
+                             { "HIGH MID", 1500.0 }, { "HIGH", 8000.0 } };
+    double worstThd = -200.0, worstGainDb = 0.0;
+
+    for (int colorIndex = 0; colorIndex < 4; ++colorIndex)
+    {
+        for (const auto& probe : probes)
+        {
+            EngineParameters p;
+            p.autoLevel = false;
+            for (auto& b : p.bands)
+            {
+                b.color = (ColorType) colorIndex;
+                b.drive = 0.0f;       // the contract under test
+                b.space = 0.0f;
+                b.behavior = 0.0f;
+                b.tone = 0.0f;
+            }
+
+            constexpr float amplitude = 0.25f;
+            const auto out = renderSine (p, probe.freq, amplitude, sr, block, 24000, 48000);
+
+            const double thd = thdPlusNoiseDb (out, probe.freq, sr);
+            worstThd = jmax (worstThd, thd);
+
+            //  Level against the clean path. The four bands recombine to an
+            //  allpass, so magnitude - not the waveform - is the thing to
+            //  compare; a sine's RMS is amplitude/sqrt(2).
+            double sumSq = 0.0;
+            for (auto v : out) sumSq += (double) v * v;
+            const double rms = std::sqrt (sumSq / (double) out.size());
+            const double gainDb = Decibels::gainToDecibels (rms / (amplitude / std::sqrt (2.0)));
+            worstGainDb = jmax (worstGainDb, std::abs (gainDb));
+
+            if (std::abs (gainDb) > 0.05 || thd > -90.0)
+                std::printf ("      %-4s %-8s @ %6.0f Hz: THD+N %7.1f dB, gain %+.4f dB\n",
+                             engineNames[colorIndex], probe.band, probe.freq, thd, gainDb);
+        }
+    }
+
+    std::printf ("      worst of 16 engine/band pairs: THD+N %.1f dB, |gain| %.4f dB\n",
+                 worstThd, worstGainDb);
+
+    check (worstThd < -90.0,
+           "Drive 0 leaves no nonlinear residual in any engine or band (worst THD+N "
+               + String (worstThd, 1) + " dB)");
+    check (worstGainDb < 0.05,
+           "Drive 0 is unity gain in any engine or band (worst |gain| "
+               + String (worstGainDb, 4) + " dB)");
+}
+
+static void testDriveSweepThroughZero()
+{
+    section ("Phase 11: sweeping Drive through the engage window does not step");
+
+    const double sr = 48000.0;
+    const int block = 64;          // small blocks: worst case for a block-rate step
+    const double freq = 110.0;
+    constexpr float amplitude = 0.3f;
+
+    //  A 110 Hz sine moves at most 0.3 * 2*pi*110/48000 = 0.0043 per sample, so
+    //  anything approaching the 0.02 FS budget is a discontinuity, not signal.
+    const double naturalSlope = amplitude * 2.0 * MathConstants<double>::pi * freq / sr;
+
+    for (int colorIndex = 0; colorIndex < 4; ++colorIndex)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        for (auto& b : p.bands)
+        {
+            b.color = (ColorType) colorIndex;
+            b.drive = 0.0f;
+            b.space = 0.0f;
+        }
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        std::vector<float> out;
+        const int totalBlocks = 1400;          // ~1.9 s: settle, 0->10, 10->0
+        int s = 0;
+
+        for (int blk = 0; blk < totalBlocks; ++blk)
+        {
+            //  Hold at 0, ramp 0->10 over ~0.35 s, hold, ramp back to 0.
+            const double t = (double) blk / totalBlocks;
+            float drive = 0.0f;
+            if (t > 0.25 && t <= 0.45) drive = (float) ((t - 0.25) / 0.20) * 10.0f;
+            else if (t > 0.45 && t <= 0.65) drive = 10.0f;
+            else if (t > 0.65 && t <= 0.85) drive = 10.0f - (float) ((t - 0.65) / 0.20) * 10.0f;
+
+            for (auto& b : p.bands)
+                b.drive = drive;
+            engine.setParameters (p);
+
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++s)
+                d[i] = amplitude * (float) std::sin (2.0 * MathConstants<double>::pi * freq * s / sr);
+
+            engine.process (io);
+
+            //  Skip the first 0.1 s: the engine's own startup is not the subject.
+            if (blk > 80)
+                for (int i = 0; i < block; ++i)
+                    out.push_back (io.getSample (0, i));
+        }
+
+        double worstStep = 0.0;
+        for (size_t i = 1; i < out.size(); ++i)
+            worstStep = jmax (worstStep, std::abs ((double) out[i] - out[i - 1]));
+
+        std::printf ("      %-4s: worst sample step %.5f FS (signal's own slope %.5f)\n",
+                     engineNames[colorIndex], worstStep, naturalSlope);
+
+        check (worstStep < 0.02,
+               String (engineNames[colorIndex])
+                   + ": Drive 0->10->0 sweep steps no more than 0.02 FS ("
+                   + String (worstStep, 5) + ")");
+    }
+}
+
 static void testGlobalDrive()
 {
     section ("Phase 7: Global Drive scales the bands' relative drives");
@@ -1851,6 +2272,38 @@ static void testGlobalDrive()
     //  Measure 3rd-harmonic content of a 220 Hz sine as globalDrive moves.
     const double sr = 48000.0;
     const int block = 512;
+
+    auto renderWith = [&] (float globalDrive, float bandDrive, std::vector<float>& out)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        p.globalDrive = globalDrive;
+        for (auto& b : p.bands)
+            b.drive = bandDrive;
+        engine.setParameters (p);
+
+        const int settle = 48000, measure = 48000;
+        out.clear();
+        out.reserve ((size_t) (settle + measure));
+
+        AudioBuffer<float> io (1, block);
+        int sampleIndex = 0;
+        while ((int) out.size() < settle + measure)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                d[i] = 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.5 * sampleIndex / sr);
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            for (int i = 0; i < block; ++i)
+                out.push_back (io.getSample (0, i));
+        }
+    };
 
     auto h3For = [&] (float globalDrive)
     {
@@ -1883,14 +2336,44 @@ static void testGlobalDrive()
                 out.push_back (io.getSample (0, i));
         }
 
-        return goertzel (out.data() + settle, measure, 220.5 * 3.0, sr);
+        //  Third harmonic RELATIVE to the fundamental. Measuring the absolute
+        //  h3 amplitude confounds "how much does it distort" with "how much
+        //  make-up gain does the engine apply", so improving the static gain
+        //  compensation would shrink the number without the drive scaling
+        //  having changed at all. The ratio is make-up-gain invariant.
+        const double h3 = goertzel (out.data() + settle, measure, 220.5 * 3.0, sr);
+        const double h1 = goertzel (out.data() + settle, measure, 220.5, sr);
+        return h3 / jmax (1.0e-12, h1);
     };
 
     const double lo = h3For (10.0f), mid = h3For (50.0f), hi = h3For (100.0f);
-    std::printf ("      h3: globalDrive 10 -> %.6f, 50 -> %.6f, 100 -> %.6f\n", lo, mid, hi);
+    std::printf ("      h3/h1: globalDrive 10 -> %.6f, 50 -> %.6f, 100 -> %.6f\n", lo, mid, hi);
 
-    check (mid > 2.0 * lo, "globalDrive 50 distorts clearly more than 10 ("
-                               + String (mid / jmax (1.0e-12, lo), 1) + "x)");
+    //  The qualitative claim: more Global Drive, more relative distortion.
+    check (mid > lo * 1.5 && hi > mid * 1.5,
+           "relative distortion rises with Global Drive ("
+               + String (mid / jmax (1.0e-12, lo), 2) + "x then "
+               + String (hi / jmax (1.0e-12, mid), 2) + "x)");
+
+    //  The exact claim, and the one the parameter actually promises: Global
+    //  Drive is a scale factor on the band drives, neutral at 50. So driving
+    //  the bands at 20 with Global 50 must be the SAME SIGNAL as driving them
+    //  at 50 with Global 20. This replaces a ">2x" threshold that had been
+    //  passing by 0.25% and would move whenever the make-up gain changed.
+    {
+        std::vector<float> viaGlobal, viaBand;
+        renderWith (20.0f, 50.0f, viaGlobal);
+        renderWith (50.0f, 20.0f, viaBand);
+
+        double worst = 0.0;
+        const auto count = jmin (viaGlobal.size(), viaBand.size());
+        for (size_t i = 0; i < count; ++i)
+            worst = jmax (worst, std::abs ((double) viaGlobal[i] - viaBand[i]));
+
+        check (worst < 1.0e-6,
+               "Global Drive 20 x band 50 == Global 50 x band 20, sample for sample (worst "
+                   + String (worst, 9) + ")");
+    }
     check (hi > 1.5 * mid, "globalDrive 100 distorts clearly more than 50 ("
                                + String (hi / jmax (1.0e-12, mid), 1) + "x)");
 }
@@ -2160,7 +2643,7 @@ static void testCpuBudget()
         std::printf ("      %dx: %.2f s CPU for %.1f s audio = %.1fx realtime\n",
                      oversamplingFactorFor (quality), seconds, audioSeconds, realtimeFactor);
 
-        check (realtimeFactor > 8.0, String (oversamplingFactorFor (quality))
+        checkPerformance (realtimeFactor > 8.0, String (oversamplingFactorFor (quality))
                    + "x runs faster than 8x realtime (" + String (realtimeFactor, 1) + "x)");
     }
 }
@@ -2243,6 +2726,10 @@ static void testSpectrumTapIsAudioSafe()
 
     MidiBuffer midi;
     AudioBuffer<float> buffer (2, 512);
+    //  An AudioBuffer is not zeroed on construction. Priming with uninitialised
+    //  memory made the "frames carry real audio" check below depend on whatever
+    //  the allocator handed back, which is why it failed intermittently.
+    buffer.clear();
     for (int i = 0; i < 4; ++i)
         proc.processBlock (buffer, midi);
 
@@ -2263,8 +2750,17 @@ static void testSpectrumTapIsAudioSafe()
            "processBlock with the spectrum tap allocates nothing (counted "
                + String (allocationCount.load()) + ")");
 
-    //  And the reader gets real frames back.
+    //  And the reader gets real frames back. Drain first, then push one known
+    //  block: with the FIFO left full from the loop above, whatever it still
+    //  holds is the OLDEST content, which is not what this check is about.
     std::vector<float> frames (2048 * 2, 0.0f);
+    proc.readSpectrumFrames (frames.data(), 2048);
+
+    for (int i = 0; i < 512; ++i)
+        for (int c = 0; c < 2; ++c)
+            buffer.setSample (c, i, 0.3f * (float) std::sin (0.05 * i));
+    proc.processBlock (buffer, midi);
+
     const int got = proc.readSpectrumFrames (frames.data(), 2048);
     check (got > 0, "spectrum tap delivers frames to the editor (" + String (got) + ")");
 
@@ -2331,9 +2827,9 @@ static void testAnalyzerCpu()
                  "                      every surface forced to redraw each frame)\n",
                  wholeMs, wholeLoad);
 
-    check (analyzerLoad < 15.0, "analyzer repaint stays under 15% of one core ("
+    checkPerformance (analyzerLoad < 15.0, "analyzer repaint stays under 15% of one core ("
                                     + String (analyzerLoad, 1) + "%)");
-    check (wholeLoad < 40.0, "forced full-editor redraw stays under 40% of one core ("
+    checkPerformance (wholeLoad < 40.0, "forced full-editor redraw stays under 40% of one core ("
                                  + String (wholeLoad, 1) + "%)");
 }
 
@@ -2363,6 +2859,7 @@ int main()
     testSoloMuteLevel();
     testEngineMatrix();
     testQualitySwitchDuringPlayback();
+    testQualitySwitchIsSeamless();
 
     testBehaviorAttackVsBody();
     testBehaviorNoPumpingOnSustained();
@@ -2371,6 +2868,9 @@ int main()
     testSpaceIsHarmonicOnly();
     testSpaceMonoBassAndCorrelation();
     testSpaceDecaysAndZeroCost();
+
+    testDriveZeroIsClean();
+    testDriveSweepThroughZero();
 
     testGlobalDrive();
     testGlobalTone();
