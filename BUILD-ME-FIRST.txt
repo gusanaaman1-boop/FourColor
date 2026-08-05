@@ -1,0 +1,106 @@
+FOUR COLOR — Windows build bundle
+Naaman · source at f96fe8b
+
+THIS IS SOURCE, NOT A PLUG-IN.
+
+There is no Windows binary in here, and there is no honest way for me to put
+one in: the plug-in has only ever been compiled on macOS, and a Windows VST3
+has to be built by MSVC on Windows. So this bundle builds it, in one command.
+
+------------------------------------------------------------------------------
+WHAT YOU NEED FIRST
+------------------------------------------------------------------------------
+
+  Visual Studio 2022, with the "Desktop development with C++" workload.
+  https://visualstudio.microsoft.com/downloads/  (the free Community edition
+  is fine). During install, tick "Desktop development with C++" - without that
+  workload there is no compiler and nothing here will work.
+
+  Git.  https://git-scm.com/download/win
+  Only needed so the script can fetch JUCE for you.
+
+  CMake comes with the Visual Studio C++ workload. Nothing to do.
+
+------------------------------------------------------------------------------
+BUILD IT
+------------------------------------------------------------------------------
+
+  1. Unzip this folder somewhere without spaces or Hebrew in the path.
+     Good:  C:\dev\FourColor
+     Bad:   C:\Users\...\שולחן העבודה\FourColor
+
+  2. Open "Developer Command Prompt for VS 2022" from the Start menu.
+     (The normal Command Prompt usually works too, but this one always does.)
+
+  3. cd /d C:\dev\FourColor
+
+  4. scripts\build-windows.bat both --clean
+
+The first run offers to clone JUCE (about 500 MB) to your user folder. Say y.
+After that it configures, builds Release and Debug, and runs the test suite.
+Expect 10-25 minutes the first time, a couple of minutes after that.
+
+------------------------------------------------------------------------------
+WHAT "SUCCESS" LOOKS LIKE
+------------------------------------------------------------------------------
+
+  369 checks, 1 failed
+
+ONE failure is expected and is not a Windows problem:
+
+  FAIL  worst loudness error is under 0.75 LU (0.86)
+
+That is a known, documented miss on one test source - docs\REPORT-RC.md
+section 5. Anything ELSE failing is real news, because every other check
+passes on macOS. Send me the line; each check prints its measured value.
+
+------------------------------------------------------------------------------
+INSTALL IT
+------------------------------------------------------------------------------
+
+Open an ADMINISTRATOR Command Prompt, then:
+
+  xcopy /E /I /Y "C:\dev\FourColor\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3" "C:\Program Files\Common Files\VST3\FourColor.vst3"
+
+Copy the .vst3 FOLDER, not its contents - a VST3 on Windows is a directory.
+
+In Cubase: Studio > VST Plug-in Manager > Update. It appears under Naaman,
+category Distortion.
+
+The standalone, if you want it without Cubase:
+  build-win\FourColor_artefacts\Release\Standalone\FourColor.exe
+
+------------------------------------------------------------------------------
+WHAT TO CHECK ONCE IT LOADS
+------------------------------------------------------------------------------
+
+  1. It scans, appears under Naaman, no blocklist entry.
+  2. The editor opens at 980x620 with no missing or clipped text. Windows
+     picks different fonts than macOS and this layout has never been seen
+     there - this is the most likely cosmetic difference.
+  3. Reported latency is 65 samples at EVERY Quality setting.
+  4. Move a crossover handle during playback: no zipper, no click.
+  5. Switch Quality during playback, all four: no dropout.
+  6. Save the project, close Cubase, reopen: every parameter returns.
+  7. Export offline and in real time: the two files should null.
+
+docs\CUBASE-CHECKLIST.md is the full list, in eleven sections, with a Windows
+column to fill in.
+
+------------------------------------------------------------------------------
+IF IT WILL NOT BUILD
+------------------------------------------------------------------------------
+
+  "cmake is not on PATH"
+      Use the Developer Command Prompt for VS 2022.
+
+  CMake cannot find a compiler
+      The C++ workload is not installed. Reopen the Visual Studio Installer,
+      Modify, tick "Desktop development with C++".
+
+  Errors inside JUCE\modules\...
+      JUCE is at the wrong commit. Delete %USERPROFILE%\JUCE and run again.
+
+  Errors in Source\... stopped by /WX
+      A genuine MSVC-only warning. This is the single most useful thing this
+      build can tell us - send me the exact line.

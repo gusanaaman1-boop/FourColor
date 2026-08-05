@@ -38,14 +38,42 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM JUCE is not bundled: it is a separate project with its own licence, and it
+REM is large. If it is missing, offer to fetch it at the exact commit the Mac
+REM builds against - a different JUCE is a different plug-in.
+set JUCE_COMMIT=857aab9c4eb3084af639a380a693dcec7d728b73
+
 if not exist "%USERPROFILE%\JUCE\CMakeLists.txt" (
-    echo ERROR: no JUCE checkout at %USERPROFILE%\JUCE
     echo.
-    echo   git clone https://github.com/juce-framework/JUCE.git "%USERPROFILE%\JUCE"
-    echo   cd /d "%USERPROFILE%\JUCE"
-    echo   git checkout 857aab9c4eb3084af639a380a693dcec7d728b73
+    echo JUCE was not found at %USERPROFILE%\JUCE
     echo.
-    exit /b 1
+    where git >nul 2>nul
+    if errorlevel 1 (
+        echo ERROR: git is not on PATH either, so it cannot be fetched for you.
+        echo        Install Git, or copy a JUCE 9 checkout to %USERPROFILE%\JUCE
+        echo        and check out commit %JUCE_COMMIT%
+        exit /b 1
+    )
+
+    set /p FETCH="Clone JUCE now (about 500 MB)? [y/N] "
+    if /I not "!FETCH!"=="y" (
+        echo Aborted. See docs\WINDOWS-QUICKSTART.md.
+        exit /b 1
+    )
+
+    echo == cloning JUCE
+    git clone https://github.com/juce-framework/JUCE.git "%USERPROFILE%\JUCE"
+    if errorlevel 1 exit /b 1
+
+    pushd "%USERPROFILE%\JUCE"
+    git checkout %JUCE_COMMIT%
+    if errorlevel 1 (
+        popd
+        echo ERROR: could not check out %JUCE_COMMIT%
+        exit /b 1
+    )
+    popd
+    echo == JUCE ready at %JUCE_COMMIT%
 )
 
 if "%DO_CLEAN%"=="1" (
