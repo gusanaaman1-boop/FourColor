@@ -11,7 +11,7 @@ echo.
 net session >nul 2>&1
 if errorlevel 1 (
     echo  [X] This needs administrator rights.
-    echo      RIGHT-CLICK UNINSTALL-FOUR-COLOR.bat -^> "Run as administrator".
+    echo      RIGHT-CLICK UNINSTALL-FOUR-COLOR.bat, then "Run as administrator".
     echo.
     pause
     exit /b 1

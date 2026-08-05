@@ -2,204 +2,213 @@
 setlocal enabledelayedexpansion
 title FOUR COLOR 0.1.0 - Installer
 
-REM Everything this prints also goes to a log file beside this script, so a
-REM failure can be sent to me as a file instead of retyped. There is no Windows
-REM machine on my side; this log is the only debugging channel there is.
-set "LOG=%~dp0FourColor-install-log.txt"
-echo FOUR COLOR installer log > "%LOG%" 2>nul
-echo Started: %DATE% %TIME% >> "%LOG%" 2>nul
-echo Script folder: %~dp0 >> "%LOG%" 2>nul
-echo. >> "%LOG%" 2>nul
+REM ---------------------------------------------------------------------------
+REM  No text echoed by this script may contain > < & | or ^.
+REM
+REM  The previous version routed every line through a "call :say" helper. %~1
+REM  strips the quotes, so a > inside the text became a redirection operator:
+REM  it mangled the output, created stray files, and broke the parsing of the
+REM  if-blocks badly enough that execution carried on past a failure and
+REM  printed "DONE" after "NOT INSTALLED". Plain echo, plain words.
+REM ---------------------------------------------------------------------------
 
-call :say ""
-call :say " ============================================"
-call :say "   FOUR COLOR by Gussa Naaman  -  v0.1.0"
-call :say "   Multiband Colour and Saturation"
-call :say " ============================================"
-call :say ""
+set "LOG=%~dp0FourColor-install-log.txt"
+echo FOUR COLOR installer log> "%LOG%"
+echo Started: %DATE% %TIME%>> "%LOG%"
+echo Script folder: %~dp0>> "%LOG%"
+
+echo.
+echo  ============================================
+echo    FOUR COLOR by Gussa Naaman  -  v0.1.0
+echo    Multiband Colour and Saturation
+echo  ============================================
+echo.
 
 REM --- administrator ----------------------------------------------------------
 net session >nul 2>&1
 if errorlevel 1 (
-    call :say " [X] This installer needs administrator rights."
-    call :say ""
-    call :say "     Close this window, RIGHT-CLICK INSTALL-FOUR-COLOR.bat"
-    call :say "     and choose 'Run as administrator'."
-    call :say ""
+    echo  [X] This installer needs administrator rights.
+    echo.
+    echo      Close this window, RIGHT-CLICK INSTALL-FOUR-COLOR.bat
+    echo      and choose "Run as administrator".
+    echo NOT ADMIN>> "%LOG%"
     goto :fail
 )
-call :say " [OK] Running as administrator."
+echo  [OK] Running as administrator.
+
+set "DEST=C:\Program Files\Common Files\VST3"
 
 REM --- find the plug-in --------------------------------------------------------
-REM Beside this file first, then the usual build output paths, then a recursive
-REM search from here. Every path tried is logged, so if it finds nothing the log
-REM says exactly where it looked.
+echo.
+echo  [1/5] Looking for FourColor.vst3 ...
 set "SRC="
-call :say ""
-call :say " [1/5] Looking for FourColor.vst3 ..."
 
-for %%D in (
-    "%~dp0FourColor.vst3"
-    "%~dp0dist\FourColor-windows-x64\FourColor.vst3"
-    "%~dp0build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
-    "%~dp0..\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
-    "%~dp0..\..\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
-    "%~dp0build\FourColor_artefacts\Release\VST3\FourColor.vst3"
-    "%~dp0..\build\FourColor_artefacts\Release\VST3\FourColor.vst3"
-) do (
-    echo   tried: %%~D >> "%LOG%" 2>nul
-    if not defined SRC if exist "%%~D\Contents" set "SRC=%%~D"
-)
+call :try "%~dp0FourColor.vst3"
+call :try "%~dp0dist\FourColor-windows-x64\FourColor.vst3"
+call :try "%~dp0build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
+call :try "%~dp0..\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
+call :try "%~dp0..\..\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
+call :try "%USERPROFILE%\Desktop\FourColor\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
+call :try "C:\dev\FourColor\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
 
 if not defined SRC (
-    call :say "       not in the usual places - searching this folder tree..."
-    for /f "delims=" %%F in ('dir /s /b /ad "%~dp0FourColor.vst3" 2^>nul') do (
-        if not defined SRC if exist "%%F\Contents" set "SRC=%%F"
+    echo        not in the usual places - searching nearby folders...
+    call :search "%~dp0"
+)
+if not defined SRC call :search "%USERPROFILE%\Desktop"
+if not defined SRC call :search "%USERPROFILE%\Downloads"
+if not defined SRC call :search "C:\dev"
+
+REM --- still nothing: ask for it ------------------------------------------------
+if not defined SRC (
+    echo.
+    echo  [?] I could not find FourColor.vst3 by myself.
+    echo.
+    echo      Open the folder where you BUILT it, go into
+    echo         build-win \ FourColor_artefacts \ Release \ VST3
+    echo      and DRAG the FourColor.vst3 folder into this window,
+    echo      then press Enter.
+    echo.
+    echo      (Or just press Enter to give up.)
+    echo.
+    set /p "DROPPED=Path: "
+    if defined DROPPED (
+        set "DROPPED=!DROPPED:"=!"
+        if exist "!DROPPED!\Contents" set "SRC=!DROPPED!"
     )
 )
 
 if not defined SRC (
-    call :say ""
-    call :say " [X] Could not find FourColor.vst3 anywhere under:"
-    call :say "     %~dp0"
-    call :say ""
-    call :say "     The log lists every path that was tried:"
-    call :say "     %LOG%"
-    call :say ""
-    call :say "     Three things it usually is:"
-    call :say ""
-    call :say "     1. The ZIP was extracted somewhere else. This .bat has to"
-    call :say "        sit IN your FourColor folder - the one containing"
-    call :say "        build-win - or next to a FourColor.vst3."
-    call :say ""
-    call :say "     2. You are running it from inside the ZIP viewer. Windows"
-    call :say "        copies the .bat out alone. Extract the ZIP properly."
-    call :say ""
-    call :say "     3. The Windows build has not been run yet:"
-    call :say "           scripts\build-windows.bat both --clean"
-    call :say ""
+    echo.
+    echo  [X] No FourColor.vst3 to install.
+    echo      Every path tried is listed in:
+    echo      %LOG%
+    echo.
+    echo      Most likely: the Windows build has not been run, or this .bat
+    echo      is sitting somewhere unrelated to it. Build with:
+    echo         scripts\build-windows.bat Release
+    echo NOT FOUND>> "%LOG%"
     goto :fail
 )
-call :say "       found: !SRC!"
 
-set "DEST=C:\Program Files\Common Files\VST3"
+echo        found:
+echo        !SRC!
+echo FOUND: !SRC!>> "%LOG%"
+
 if not exist "%DEST%\" mkdir "%DEST%" 2>nul
 
 REM --- warn about a running DAW ------------------------------------------------
 set "DAW="
-for %%P in (Cubase.exe Nuendo.exe Ableton.exe FL64.exe FL.exe reaper.exe WaveLab.exe) do (
+for %%P in (Cubase.exe Nuendo.exe Ableton.exe FL64.exe reaper.exe) do (
     tasklist /fi "imagename eq %%P" 2>nul | find /i "%%P" >nul && set "DAW=%%P"
 )
 if defined DAW (
-    call :say ""
-    call :say " [!] !DAW! appears to be running."
-    call :say "     Windows will not replace the plugin while a host has it"
-    call :say "     loaded. Close it now, then press any key."
+    echo.
+    echo  [!] !DAW! is running. Windows will not replace a plugin a host
+    echo      has loaded. Close it, then press any key.
+    echo DAW RUNNING: !DAW!>> "%LOG%"
     pause
 )
 
 REM --- remove any previous install --------------------------------------------
-call :say " [2/5] Removing any previous version..."
-
+echo  [2/5] Removing any previous version...
 if exist "%DEST%\FourColor.vst3\" (
-    call :say "       found a folder bundle - deleting"
+    echo        deleting old folder bundle
     rmdir /s /q "%DEST%\FourColor.vst3"
 ) else if exist "%DEST%\FourColor.vst3" (
-    call :say "       found a single file - deleting"
+    echo        deleting old single file
     del /f /q "%DEST%\FourColor.vst3"
 ) else (
-    call :say "       nothing to remove"
+    echo        nothing to remove
 )
 
 if exist "%DEST%\FourColor.vst3" (
-    call :say ""
-    call :say " [X] The old FOUR COLOR could not be removed."
-    call :say "     Something still has it open - a DAW, or the plugin scanner"
-    call :say "     that keeps running for a while after a DAW closes."
-    call :say ""
-    call :say "     Close every audio application, wait, and run this again."
+    echo.
+    echo  [X] The old version could not be removed. Something has it open -
+    echo      a DAW, or the plugin scanner that keeps running after one closes.
+    echo      Close every audio application and run this again.
+    echo REMOVE FAILED>> "%LOG%"
     goto :fail
 )
 
 REM --- install ------------------------------------------------------------------
-call :say " [3/5] Installing the VST3 ..."
+echo  [3/5] Installing...
 xcopy /e /i /y "!SRC!" "%DEST%\FourColor.vst3\" >> "%LOG%" 2>&1
 if errorlevel 1 (
-    call :say ""
-    call :say " [X] Copy failed. xcopy's own output is in the log."
-    call :say "     Source: !SRC!"
-    call :say "     Target: %DEST%\FourColor.vst3"
+    echo.
+    echo  [X] Copy failed. xcopy's own message is in the log.
+    echo      From: !SRC!
+    echo      To:   %DEST%\FourColor.vst3
+    echo COPY FAILED>> "%LOG%"
     goto :fail
 )
 
 REM --- verify -------------------------------------------------------------------
-call :say " [4/5] Verifying..."
+echo  [4/5] Verifying...
 if not exist "%DEST%\FourColor.vst3\Contents\x86_64-win\FourColor.vst3" (
-    call :say ""
-    call :say " [X] The plugin binary is not where it should be after copying."
-    call :say "     Expected:"
-    call :say "     %DEST%\FourColor.vst3\Contents\x86_64-win\FourColor.vst3"
-    call :say ""
-    call :say "     What IS there:"
+    echo.
+    echo  [X] The binary is not where it should be after copying.
+    echo      Wanted: %DEST%\FourColor.vst3\Contents\x86_64-win\FourColor.vst3
+    echo VERIFY FAILED - what is actually there:>> "%LOG%"
     dir /s /b "%DEST%\FourColor.vst3" >> "%LOG%" 2>&1
-    dir /b "%DEST%\FourColor.vst3\Contents" 2>nul
     goto :fail
 )
-call :say "       verified."
+echo        verified.
 
 REM --- standalone ---------------------------------------------------------------
-call :say " [5/5] Standalone app..."
+echo  [5/5] Standalone app...
 set "EXE="
-for %%E in (
-    "%~dp0FourColor.exe"
-    "%~dp0dist\FourColor-windows-x64\FourColor.exe"
-    "%~dp0build-win\FourColor_artefacts\Release\Standalone\FourColor.exe"
-    "%~dp0..\build-win\FourColor_artefacts\Release\Standalone\FourColor.exe"
-) do (
-    if not defined EXE if exist "%%~E" set "EXE=%%~E"
+if exist "%~dp0FourColor.exe" set "EXE=%~dp0FourColor.exe"
+if not defined EXE for %%E in ("!SRC!\..\..\Standalone\FourColor.exe") do (
+    if exist "%%~fE" set "EXE=%%~fE"
 )
-
 if defined EXE (
-    set "APPDIR=C:\Program Files\Naaman\FOUR COLOR"
-    if not exist "!APPDIR!\" mkdir "!APPDIR!" 2>nul
-    copy /y "!EXE!" "!APPDIR!\FourColor.exe" >nul 2>&1
-    if exist "!APPDIR!\FourColor.exe" (
-        call :say "       installed to !APPDIR!"
-    ) else (
-        call :say "       [!] standalone did not copy - the VST3 is fine, ignore this"
-    )
+    if not exist "C:\Program Files\Naaman\FOUR COLOR\" mkdir "C:\Program Files\Naaman\FOUR COLOR" 2>nul
+    copy /y "!EXE!" "C:\Program Files\Naaman\FOUR COLOR\FourColor.exe" >nul 2>&1
+    echo        installed
 ) else (
-    call :say "       not found - skipping (the VST3 is what matters)"
+    echo        not found - skipping, the VST3 is what matters
 )
 
-call :say ""
-call :say " ============================================"
-call :say "   DONE. FOUR COLOR is installed."
-call :say ""
-call :say "   %DEST%\FourColor.vst3"
-call :say ""
-call :say "   1. Start Cubase"
-call :say "   2. Studio ^> VST Plug-in Manager ^> Update"
-call :say "   3. FourColor, under Naaman, in Distortion"
-call :say " ============================================"
-call :say ""
-echo  Log written to: %LOG%
+echo INSTALL OK>> "%LOG%"
+echo.
+echo  ============================================
+echo    DONE. FOUR COLOR is installed.
+echo.
+echo    %DEST%\FourColor.vst3
+echo.
+echo    1. Start Cubase
+echo    2. Studio menu, then VST Plug-in Manager, then Update
+echo    3. If you do not see it, type "Four" in the plugin
+echo       search box - it may be filed under Other.
+echo  ============================================
 echo.
 pause
+exit /b 0
+
+REM =============================================================================
+:try
+if defined SRC exit /b 0
+echo tried: %~1>> "%LOG%"
+if exist "%~1\Contents" set "SRC=%~1"
+exit /b 0
+
+:search
+if defined SRC exit /b 0
+if not exist "%~1" exit /b 0
+echo searching: %~1>> "%LOG%"
+for /f "delims=" %%F in ('dir /s /b /ad "%~1\FourColor.vst3" 2^>nul') do (
+    if not defined SRC if exist "%%F\Contents" set "SRC=%%F"
+)
 exit /b 0
 
 :fail
-call :say ""
-call :say " ------------------------------------------------"
-call :say "  NOT INSTALLED."
-call :say "  Send me this file and I will know what happened:"
-call :say "  %LOG%"
-call :say " ------------------------------------------------"
+echo.
+echo  ------------------------------------------------
+echo   NOT INSTALLED.
+echo   Send me this file:
+echo   %LOG%
+echo  ------------------------------------------------
 echo.
 pause
 exit /b 1
-
-:say
-echo %~1
-echo %~1 >> "%LOG%" 2>nul
-exit /b 0

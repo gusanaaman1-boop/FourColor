@@ -14,7 +14,7 @@ INSTALL - this is the whole thing
      Windows will not replace a plugin a running host has open. This is the
      usual reason an update appears to do nothing.
 
-  3. RIGHT-CLICK  INSTALL-FOUR-COLOR.bat  ->  "Run as administrator".
+  3. RIGHT-CLICK  INSTALL-FOUR-COLOR.bat  then "Run as administrator".
 
   The installer FINDS the plug-in itself. It looks beside itself first, then
   in build-win\FourColor_artefacts\Release\, then dist\, so it works whether
@@ -26,7 +26,7 @@ INSTALL - this is the whole thing
     FourColor.vst3  ->  C:\Program Files\Common Files\VST3
     FourColor.exe   ->  C:\Program Files\Naaman\FOUR COLOR   (standalone)
 
-  4. Start Cubase, then Studio > VST Plug-in Manager > Update.
+  4. Start Cubase, then Studio menu, then VST Plug-in Manager, then Update.
      FOUR COLOR appears under Naaman, category Distortion.
 
 ------------------------------------------------------------------------------
