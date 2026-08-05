@@ -4,21 +4,6 @@
 
 namespace fourcolor::ui
 {
-    namespace
-    {
-        constexpr float levelMinDb = -18.0f, levelMaxDb = 12.0f;
-
-        juce::String rangeText (float lo, float hi)
-        {
-            auto one = [] (float hz)
-            {
-                return hz >= 1000.0f ? juce::String (hz / 1000.0f, hz < 10000.0f ? 2 : 0) + " kHz"
-                                     : juce::String ((int) std::round (hz)) + " Hz";
-            };
-            return one (lo) + " – " + one (hi);
-        }
-    }
-
     BandCards::BandCards (FourColorProcessor& processor)
         : proc (processor)
     {
@@ -27,12 +12,21 @@ namespace fourcolor::ui
         for (int b = 0; b < numBands; ++b)
         {
             auto& card = cards[b];
+            const auto accent = tokens::band[b];
+
+            card.drive = std::make_unique<Knob> (state, param::band (b, param::drive), "DRIVE",
+                                                 accent, Knob::Size::small,
+                                                 "Amount of harmonic saturation");
+            card.level = std::make_unique<Knob> (state, param::band (b, param::level), "LEVEL",
+                                                 tokens::neutralArcII, Knob::Size::small,
+                                                 "Band output level");
+            addAndMakeVisible (*card.drive);
+            addAndMakeVisible (*card.level);
 
             for (auto* button : { &card.solo, &card.mute, &card.bypass })
             {
                 button->setClickingTogglesState (true);
-                button->setColour (juce::TextButton::buttonOnColourId,
-                                   colour::band[b].withAlpha (0.55f));
+                button->setColour (juce::TextButton::buttonOnColourId, accent);
                 addAndMakeVisible (*button);
             }
             card.solo.setTooltip ("Solo band");
@@ -44,27 +38,27 @@ namespace fourcolor::ui
             card.aMute   = std::make_unique<BA> (state, param::band (b, param::mute), card.mute);
             card.aBypass = std::make_unique<BA> (state, param::band (b, param::bypass), card.bypass);
 
-            auto* levelParam = state.getParameter (param::band (b, param::level));
-            jassert (levelParam != nullptr);
-            card.levelAttachment = std::make_unique<juce::ParameterAttachment> (
-                *levelParam,
-                [this, b] (float v) { cards[b].levelDb = v; repaint(); },
+            auto* colorParam = state.getParameter (param::band (b, param::color));
+            card.colorAttachment = std::make_unique<juce::ParameterAttachment> (
+                *colorParam,
+                [this, b] (float v) { cards[b].colorIndex = juce::roundToInt (v); repaint(); },
                 nullptr);
-            card.levelAttachment->sendInitialUpdate();
+            card.colorAttachment->sendInitialUpdate();
         }
 
-        startTimerHz (30);
+        //  Only used to feed the DRIVE knobs' spark energy with real level.
+        startTimerHz (20);
     }
+
+    BandCards::~BandCards() = default;
 
     void BandCards::timerCallback()
     {
         for (int b = 0; b < numBands; ++b)
         {
             const float peak = proc.getEngine().getBand (b).readAndResetOutputPeak();
-            auto& shown = cards[b].meterPeak;
-            shown = juce::jmax (peak, shown * 0.82f);
+            cards[b].drive->setEnergy (juce::jlimit (0.0f, 1.0f, peak * 1.6f));
         }
-        repaint();
     }
 
     void BandCards::setSelectedBand (int band)
@@ -73,86 +67,79 @@ namespace fourcolor::ui
         repaint();
     }
 
-    void BandCards::setCutFrequencies (float f1, float f2, float f3)
-    {
-        if (cutHz[0] != f1 || cutHz[1] != f2 || cutHz[2] != f3)
-        {
-            cutHz[0] = f1; cutHz[1] = f2; cutHz[2] = f3;
-            repaint();
-        }
-    }
-
     juce::Rectangle<int> BandCards::cardBounds (int b) const
     {
         auto area = getLocalBounds();
-        const int gap = 6;
+        const int gap = (int) metric::cardGap;
         const int w = (area.getWidth() - gap * (numBands - 1)) / numBands;
         return { area.getX() + b * (w + gap), area.getY(), w, area.getHeight() };
     }
 
-    juce::Rectangle<float> BandCards::meterBounds (int b) const
+    int BandCards::cardAt (juce::Point<int> p) const
     {
-        auto card = cardBounds (b).toFloat().reduced (10.0f, 8.0f);
-        auto bottom = card.removeFromBottom (18.0f);
-        bottom.removeFromLeft (3.0f * 24.0f);     // S/M/B row sits to the left
-        bottom.removeFromLeft (8.0f);
-        return bottom.reduced (0.0f, 4.0f);
+        for (int b = 0; b < numBands; ++b)
+            if (cardBounds (b).contains (p))
+                return b;
+        return -1;
     }
 
     void BandCards::paint (juce::Graphics& g)
     {
-        const float edges[5] = { 20.0f, cutHz[0], cutHz[1], cutHz[2], 20000.0f };
-
         for (int b = 0; b < numBands; ++b)
         {
-            const auto card = cardBounds (b).toFloat();
+            auto card = cardBounds (b).toFloat();
             const bool isSelected = b == selectedBand;
-            const auto c = colour::band[b];
+            const bool isHover = b == hoverCard && ! isSelected;
+            const bool isPressed = b == pressedCard;
+            const auto c = tokens::band[b];
 
-            g.setColour (isSelected ? colour::panelHi.interpolatedWith (c, 0.06f) : colour::panel);
-            g.fillRoundedRectangle (card, 6.0f);
-            g.setColour (isSelected ? c.withAlpha (0.8f) : colour::panelLine);
-            g.drawRoundedRectangle (card.reduced (0.5f), 6.0f, isSelected ? 1.4f : 1.0f);
+            if (isPressed)
+                card.translate (0.0f, 1.0f);
 
-            //  Header: BAND n + live range.
-            auto header = card.reduced (10.0f, 8.0f);
-            g.setFont (labelFont (12.0f, true));
-            g.setColour (c);
-            g.drawText ("BAND " + juce::String (b + 1),
-                        header.removeFromTop (16.0f), juce::Justification::topLeft);
-            g.setFont (uiFont (10.5f));
-            g.setColour (colour::textDim);
-            g.drawText (rangeText (edges[b], edges[b + 1]),
-                        card.reduced (10.0f, 8.0f).withTrimmedLeft (64.0f).removeFromTop (15.0f),
-                        juce::Justification::topLeft);
+            if (isSelected)
+                paint::glow (g, card, metric::corner, c, 14.0f, 0.12f);
+            else
+                paint::dropShadow (g, card, metric::corner, 4.0f, 0.26f, 2.0f);
 
-            //  Meter track + segments + level thumb.
-            const auto meter = meterBounds (b);
-            const auto track = meter.withTrimmedRight (12.0f);
-
-            g.setColour (juce::Colour (0xff0a0b0d));
-            g.fillRoundedRectangle (track, 2.0f);
-
-            const float peakDb = juce::Decibels::gainToDecibels (cards[b].meterPeak, -42.0f);
-            const float peakT = juce::jlimit (0.0f, 1.0f, (peakDb + 42.0f) / 48.0f);
-            const int numSegments = juce::jmax (8, (int) (track.getWidth() / 5.0f));
-            const int litSegments = (int) std::round (peakT * numSegments);
-
-            for (int s = 0; s < numSegments; ++s)
+            if (isSelected)
             {
-                const float sx = track.getX() + track.getWidth() * (float) s / numSegments;
-                g.setColour (s < litSegments ? c.withAlpha (0.9f) : c.withAlpha (0.12f));
-                g.fillRect (sx + 0.5f, track.getY() + 1.0f,
-                            track.getWidth() / numSegments - 1.5f, track.getHeight() - 2.0f);
+                //  Vertical wash: 13% of the band colour at the top down to the
+                //  panel base at the bottom.
+                juce::ColourGradient wash (c.withAlpha (0.13f), card.getCentreX(), card.getY(),
+                                           tokens::panelBase, card.getCentreX(), card.getBottom(),
+                                           false);
+                g.setGradientFill (wash);
+                g.fillRoundedRectangle (card, metric::corner);
+            }
+            else
+            {
+                auto fill = isHover ? tokens::panelHover : tokens::panelBase;
+                if (isPressed)
+                    fill = fill.overlaidWith (juce::Colours::black.withAlpha (0.05f));
+                g.setColour (fill);
+                g.fillRoundedRectangle (card, metric::corner);
             }
 
-            //  Level thumb rides the same track (BAND LEVEL, -18..+12 dB).
-            const float lt = juce::jmap (cards[b].levelDb, levelMinDb, levelMaxDb, 0.0f, 1.0f);
-            const float tx = track.getX() + lt * track.getWidth();
-            g.setColour (juce::Colours::black.withAlpha (0.5f));
-            g.fillEllipse (tx - 5.0f, meter.getCentreY() - 4.5f, 11.0f, 11.0f);
-            g.setColour (juce::Colour (0xffcfcfd4));
-            g.fillEllipse (tx - 5.5f, meter.getCentreY() - 5.5f, 11.0f, 11.0f);
+            g.setColour (juce::Colours::white.withAlpha (0.025f));
+            g.drawLine (card.getX() + metric::corner, card.getY() + 1.0f,
+                        card.getRight() - metric::corner, card.getY() + 1.0f, 1.0f);
+
+            g.setColour (isSelected ? c : (isHover ? tokens::borderHover : tokens::borderSoft));
+            g.drawRoundedRectangle (card.reduced (0.5f), metric::corner, 1.0f);
+
+            //  Band name and engine name.
+            auto text = card.reduced (12.0f, 9.0f);
+            const float nameAlpha = isSelected ? 1.0f : (isHover ? 0.92f : 0.80f);
+
+            g.setFont (captionFont (12.5f, true));
+            g.setColour (c.withAlpha (nameAlpha));
+            g.drawText (bandName (b), text.removeFromTop (16.0f), juce::Justification::topLeft);
+
+            text.removeFromTop (4.0f);
+            g.setFont (captionFont (11.5f));
+            g.setColour (isSelected ? c.withAlpha (0.95f) : tokens::textSecondary);
+            g.drawText (colorName ((ColorType) cards[b].colorIndex),
+                        text.removeFromTop (14.0f), juce::Justification::topLeft);
         }
     }
 
@@ -160,54 +147,57 @@ namespace fourcolor::ui
     {
         for (int b = 0; b < numBands; ++b)
         {
-            auto card = cardBounds (b).reduced (10, 8);
-            auto row = card.removeFromBottom (18);
+            auto card = cardBounds (b).reduced (10, 7);
             auto& cd = cards[b];
-            cd.solo.setBounds (row.removeFromLeft (20));
-            row.removeFromLeft (2);
-            cd.mute.setBounds (row.removeFromLeft (20));
-            row.removeFromLeft (2);
-            cd.bypass.setBounds (row.removeFromLeft (20));
+
+            //  Right half: the two small knobs.
+            const int knobW = juce::jmax (46, card.getWidth() / 3);
+            cd.level->setBounds (card.removeFromRight (knobW));
+            cd.drive->setBounds (card.removeFromRight (knobW));
+
+            //  Bottom-left: S / M / B.
+            auto row = card.removeFromBottom (18).removeFromLeft (76);
+            const int bw = juce::jmin (22, row.getWidth() / 3 - 2);
+            cd.solo.setBounds (row.removeFromLeft (bw));
+            row.removeFromLeft (3);
+            cd.mute.setBounds (row.removeFromLeft (bw));
+            row.removeFromLeft (3);
+            cd.bypass.setBounds (row.removeFromLeft (bw));
         }
+    }
+
+    void BandCards::mouseMove (const juce::MouseEvent& e)
+    {
+        const int c = cardAt (e.getPosition());
+        if (c != hoverCard)
+        {
+            hoverCard = c;
+            repaint();
+        }
+    }
+
+    void BandCards::mouseExit (const juce::MouseEvent&)
+    {
+        if (hoverCard != -1) { hoverCard = -1; repaint(); }
     }
 
     void BandCards::mouseDown (const juce::MouseEvent& e)
     {
-        for (int b = 0; b < numBands; ++b)
+        pressedCard = cardAt (e.getPosition());
+        repaint();
+    }
+
+    void BandCards::mouseUp (const juce::MouseEvent& e)
+    {
+        const int c = cardAt (e.getPosition());
+        pressedCard = -1;
+
+        if (c >= 0)
         {
-            if (meterBounds (b).expanded (4.0f).contains (e.position))
-            {
-                draggingLevelBand = b;
-                cards[b].levelAttachment->beginGesture();
-                mouseDrag (e);
-                return;
-            }
-
-            if (cardBounds (b).contains (e.position.toInt()))
-            {
-                setSelectedBand (b);
-                if (onBandSelected)
-                    onBandSelected (b);
-                return;
-            }
+            setSelectedBand (c);
+            if (onBandSelected)
+                onBandSelected (c);
         }
-    }
-
-    void BandCards::mouseDrag (const juce::MouseEvent& e)
-    {
-        if (draggingLevelBand < 0)
-            return;
-
-        const auto track = meterBounds (draggingLevelBand).withTrimmedRight (12.0f);
-        const float t = juce::jlimit (0.0f, 1.0f, (e.position.x - track.getX()) / track.getWidth());
-        cards[draggingLevelBand].levelAttachment->setValueAsPartOfGesture (
-            juce::jmap (t, 0.0f, 1.0f, levelMinDb, levelMaxDb));
-    }
-
-    void BandCards::mouseUp (const juce::MouseEvent&)
-    {
-        if (draggingLevelBand >= 0)
-            cards[draggingLevelBand].levelAttachment->endGesture();
-        draggingLevelBand = -1;
+        repaint();
     }
 }

@@ -1,6 +1,6 @@
-// The global strip, mockup layout: [meter] INPUT | GLOBAL DRIVE | GLOBAL TONE
-// + round glowing AUTO LEVEL | MIX | OUTPUT [meter], with hairline separators.
-// Meters are real block peaks from the processor's atomics.
+// The global strip: [L/R meter] INPUT | GLOBAL DRIVE | AUTO LEVEL | GLOBAL
+// TONE | MIX | OUTPUT [L/R meter], with faint vertical separators between the
+// groups. Meters read real block peaks and never take the band colours.
 
 #pragma once
 
@@ -29,6 +29,8 @@ namespace fourcolor::ui
         class RoundToggle;
 
         void timerCallback() override;
+        void drawStereoMeter (juce::Graphics&, juce::Rectangle<float>,
+                              const float* levels, const float* peaks) const;
 
         FourColorProcessor& proc;
 
@@ -36,7 +38,10 @@ namespace fourcolor::ui
         std::unique_ptr<RoundToggle> autoLevelButton;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoLevelAttachment;
 
-        float displayedIn = 0.0f, displayedOut = 0.0f;
+        float inLevel[2] { 0.0f, 0.0f }, outLevel[2] { 0.0f, 0.0f };
+        float inPeakHold[2] { 0.0f, 0.0f }, outPeakHold[2] { 0.0f, 0.0f };
+        int inPeakAge[2] { 0, 0 }, outPeakAge[2] { 0, 0 };
+
         juce::Rectangle<float> inMeter, outMeter;
         std::vector<int> separatorX;
 

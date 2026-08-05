@@ -1,13 +1,12 @@
-// Top strip, mockup layout: spaced wordmark | ◀ preset name* ▶ | A / B | undo
-// | QUALITY combo | power (bypass). The asterisk marks a modified preset; the
-// preset name opens a category menu.
+// Top strip: spaced wordmark with the four band dots | preset browser
+// (‹ name* ›) | A / B | undo | QUALITY | power.
 
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "../Core/ParameterIds.h"
-#include "Theme.h"
+#include "Design.h"
 
 namespace fourcolor
 {
@@ -27,7 +26,8 @@ namespace fourcolor::ui
 
     private:
         class PowerButton;
-        class IconButton;
+        class UndoButton;
+        class PresetField;
 
         void timerCallback() override;
         void showPresetMenu();
@@ -35,16 +35,16 @@ namespace fourcolor::ui
         FourColorProcessor& proc;
 
         std::unique_ptr<juce::ArrowButton> prevButton, nextButton;
-        juce::TextButton presetNameButton;
+        std::unique_ptr<PresetField> presetField;
         juce::TextButton aButton { "A" }, bButton { "B" };
-        std::unique_ptr<IconButton> undoButton;
+        std::unique_ptr<UndoButton> undoButton;
         juce::ComboBox qualityBox;
         std::unique_ptr<PowerButton> powerButton;
 
         std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> qualityAttachment;
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttachment;
 
-        juce::Rectangle<int> qualityLabelArea;
+        juce::Rectangle<int> logoArea;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TopBar)
     };

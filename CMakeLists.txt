@@ -56,9 +56,9 @@ set(FOURCOLOR_CORE_SOURCES
     Source/Dsp/HarmonicSpace.cpp
     Source/Dsp/NonlinearStage.cpp
     Source/Dsp/ToneStage.cpp
+    Source/Ui/Analyzer.cpp
     Source/Ui/BandCards.cpp
     Source/Ui/BandStrip.cpp
-    Source/Ui/CrossoverDisplay.cpp
     Source/Ui/GlobalBar.cpp
     Source/Ui/Knob.cpp
     Source/Ui/Theme.cpp

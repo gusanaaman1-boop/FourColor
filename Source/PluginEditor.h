@@ -3,17 +3,18 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "PluginProcessor.h"
+#include "Ui/Analyzer.h"
 #include "Ui/BandCards.h"
 #include "Ui/BandStrip.h"
-#include "Ui/CrossoverDisplay.h"
 #include "Ui/GlobalBar.h"
 #include "Ui/Theme.h"
 #include "Ui/TopBar.h"
 
 namespace fourcolor
 {
-    //  Layout (mockup): TopBar / spectrum display / band cards / selected-band
-    //  panel / global bar.
+    //  Layout follows the reference proportions (Design.h, metric::*):
+    //  top bar 0-8% | analyzer 8-37% | band cards 38-52.5% |
+    //  selected band 53.5-80.5% | global strip 81.5-100%.
     class FourColorEditor : public juce::AudioProcessorEditor, private juce::Timer
     {
     public:
@@ -25,16 +26,19 @@ namespace fourcolor
 
     private:
         void timerCallback() override;
+        void selectBand (int band);
 
         FourColorProcessor& processor;
 
         ui::Laf laf;
         ui::TopBar topBar { processor };
-        ui::CrossoverDisplay display { processor };
+        ui::Analyzer analyzer { processor };
         ui::BandCards bandCards { processor };
         ui::BandStrip bandStrip { processor.apvts };
         ui::GlobalBar globalBar { processor };
-        juce::TooltipWindow tooltips { this, 600 };
+        juce::TooltipWindow tooltips { this, 550 };
+
+        int selectedBand = 0;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FourColorEditor)
     };
