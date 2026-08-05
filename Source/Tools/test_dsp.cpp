@@ -1803,6 +1803,236 @@ static void testSpaceDecaysAndZeroCost()
 }
 
 // ================================================================================
+// Phase 7 — global integration
+// ================================================================================
+namespace
+{
+    //  Steady output RMS of the full engine for a generator, after settling.
+    double engineSteadyRms (const EngineParameters& p, double freq, double sr = 48000.0,
+                            float amp = 0.3f, int settleBlocks = 60, int measureBlocks = 60)
+    {
+        const int block = 512;
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        double sq = 0.0; int counted = 0;
+        int sampleIndex = 0;
+
+        for (int blk = 0; blk < settleBlocks + measureBlocks; ++blk)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                d[i] = amp * (float) std::sin (2.0 * MathConstants<double>::pi * freq * sampleIndex / sr);
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (blk >= settleBlocks)
+            {
+                for (int i = 0; i < block; ++i)
+                    sq += (double) io.getSample (0, i) * io.getSample (0, i);
+                counted += block;
+            }
+        }
+        return std::sqrt (sq / counted);
+    }
+}
+
+static void testGlobalDrive()
+{
+    section ("Phase 7: Global Drive scales the bands' relative drives");
+
+    //  Measure 3rd-harmonic content of a 220 Hz sine as globalDrive moves.
+    const double sr = 48000.0;
+    const int block = 512;
+
+    auto h3For = [&] (float globalDrive)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        p.globalDrive = globalDrive;
+        for (auto& b : p.bands)
+            b.drive = 50.0f;
+        engine.setParameters (p);
+
+        const int settle = 48000, measure = 48000;
+        std::vector<float> out;
+        out.reserve ((size_t) (settle + measure));
+
+        AudioBuffer<float> io (1, block);
+        int sampleIndex = 0;
+        while ((int) out.size() < settle + measure)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                d[i] = 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.5 * sampleIndex / sr);
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            for (int i = 0; i < block; ++i)
+                out.push_back (io.getSample (0, i));
+        }
+
+        return goertzel (out.data() + settle, measure, 220.5 * 3.0, sr);
+    };
+
+    const double lo = h3For (10.0f), mid = h3For (50.0f), hi = h3For (100.0f);
+    std::printf ("      h3: globalDrive 10 -> %.6f, 50 -> %.6f, 100 -> %.6f\n", lo, mid, hi);
+
+    check (mid > 2.0 * lo, "globalDrive 50 distorts clearly more than 10 ("
+                               + String (mid / jmax (1.0e-12, lo), 1) + "x)");
+    check (hi > 1.5 * mid, "globalDrive 100 distorts clearly more than 50 ("
+                               + String (hi / jmax (1.0e-12, mid), 1) + "x)");
+}
+
+static void testGlobalTone()
+{
+    section ("Phase 7: Global Tone tilts around 800 Hz");
+
+    EngineParameters neutral;
+    neutral.autoLevel = false;
+    for (auto& b : neutral.bands)
+        b.bypass = true;
+
+    auto bright = neutral; bright.globalTone = 100.0f;
+    auto dark   = neutral; dark.globalTone   = -100.0f;
+
+    const double loN = engineSteadyRms (neutral, 200.0), hiN = engineSteadyRms (neutral, 4000.0);
+    const double loB = engineSteadyRms (bright, 200.0),  hiB = engineSteadyRms (bright, 4000.0);
+    const double loD = engineSteadyRms (dark, 200.0),    hiD = engineSteadyRms (dark, 4000.0);
+
+    const double tiltB = Decibels::gainToDecibels ((hiB / hiN) / (loB / loN));
+    const double tiltD = Decibels::gainToDecibels ((hiD / hiN) / (loD / loN));
+
+    std::printf ("      bright tilt %.2f dB, dark tilt %.2f dB (4 kHz vs 200 Hz)\n", tiltB, tiltD);
+
+    check (tiltB > 8.0, "BRIGHT tilts 4 kHz up vs 200 Hz by >8 dB (" + String (tiltB, 1) + ")");
+    check (tiltD < -8.0, "DARK tilts 4 kHz down vs 200 Hz by >8 dB (" + String (tiltD, 1) + ")");
+}
+
+static void testAutoLevel()
+{
+    section ("Phase 7: Auto Level");
+
+    //  Heavy FUZZ drive changes loudness; Auto Level must pull the output back
+    //  towards the input level, slowly and within bounds.
+    EngineParameters p;
+    for (auto& b : p.bands)
+    {
+        b.color = ColorType::fuzz;
+        b.drive = 95.0f;
+    }
+
+    p.autoLevel = false;
+    const double without = engineSteadyRms (p, 220.0, 48000.0, 0.3f, 200, 100);
+    p.autoLevel = true;
+    const double with_   = engineSteadyRms (p, 220.0, 48000.0, 0.3f, 400, 100);
+
+    const double inRms = 0.3 / std::sqrt (2.0);
+    const double devWithout = std::abs (Decibels::gainToDecibels (without / inRms));
+    const double devWith    = std::abs (Decibels::gainToDecibels (with_ / inRms));
+
+    std::printf ("      deviation from input level: AL off %.2f dB, AL on %.2f dB\n",
+                 devWithout, devWith);
+
+    check (devWith < devWithout, "Auto Level reduces the loudness error");
+    check (devWith < 1.5, "Auto Level lands within 1.5 dB of the input level ("
+                              + String (devWith, 2) + " dB)");
+
+    //  Silence handling: after the signal stops, the gain must hold, not drift.
+    {
+        const int block = 512;
+        FourColorEngine engine;
+        engine.prepare (48000.0, block, 1);
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        int sampleIndex = 0;
+
+        //  2 s of tone, then 2 s of silence.
+        float gainAfterTone = 0.0f, gainAfterSilence = 0.0f;
+        for (int blk = 0; blk < 380; ++blk)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                d[i] = blk < 190 ? 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * sampleIndex / 48000.0)
+                                 : 0.0f;
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (blk == 189) gainAfterTone = 1.0f;      // marker; gain read below
+        }
+        juce::ignoreUnused (gainAfterTone, gainAfterSilence);
+
+        //  The engine has no public gain probe; assert behaviourally instead:
+        //  a tone that resumes after silence must come back at the SAME level
+        //  (gain held), not shifted (gain drifted against the noise floor).
+        double resumeSq = 0.0; int counted = 0;
+        for (int blk = 0; blk < 40; ++blk)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++sampleIndex)
+                d[i] = 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * sampleIndex / 48000.0);
+            engine.setParameters (p);
+            engine.process (io);
+            if (blk >= 20)
+            {
+                for (int i = 0; i < block; ++i)
+                    resumeSq += (double) io.getSample (0, i) * io.getSample (0, i);
+                counted += block;
+            }
+        }
+        const double resumeDev = std::abs (Decibels::gainToDecibels (
+            std::sqrt (resumeSq / counted) / (with_ > 0 ? with_ : 1.0)));
+        check (resumeDev < 1.0, "gain held through silence: resumed tone within 1 dB ("
+                                    + String (resumeDev, 2) + " dB)");
+    }
+}
+
+static void testMixNoCombFiltering()
+{
+    section ("Phase 7: Mix does not comb-filter");
+
+    //  50% mix with all bands bypassed: wet = allpassed clean. Because the
+    //  Mix dry leg is the same allpass reference, the sum must stay FLAT.
+    //  (Mixing against the raw input would notch around the crossover points.)
+    EngineParameters p;
+    p.autoLevel = false;
+    p.mixPercent = 50.0f;
+    for (auto& b : p.bands)
+        b.bypass = true;
+
+    double worst = 0.0;
+    for (double freq : { 60.0, 120.0, 240.0, 700.0, 1400.0, 4500.0, 9000.0, 15000.0 })
+    {
+        const double rms = engineSteadyRms (p, freq);
+        const double dev = Decibels::gainToDecibels (rms / (0.3 / std::sqrt (2.0)), -120.0);
+        worst = jmax (worst, std::abs (dev));
+        checkNear (dev, 0.0, 0.2, "mix 50% flat at " + String (freq, 0) + " Hz");
+    }
+    std::printf ("      worst mix-path deviation: %.4f dB\n", worst);
+
+    //  And with real distortion at 50% mix nothing collapses either: level
+    //  stays within the loudness window at a mid frequency near a crossover.
+    EngineParameters hot;
+    hot.autoLevel = false;
+    hot.mixPercent = 50.0f;
+    for (auto& b : hot.bands)
+        b.drive = 70.0f;
+
+    const double rms700 = engineSteadyRms (hot, 700.0);
+    const double dev700 = Decibels::gainToDecibels (rms700 / (0.3 / std::sqrt (2.0)), -120.0);
+    check (std::abs (dev700) < 4.0, "50% mix at the crossover with hot drive stays in window ("
+                                        + String (dev700, 2) + " dB)");
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -1836,6 +2066,11 @@ int main()
     testSpaceIsHarmonicOnly();
     testSpaceMonoBassAndCorrelation();
     testSpaceDecaysAndZeroCost();
+
+    testGlobalDrive();
+    testGlobalTone();
+    testAutoLevel();
+    testMixNoCombFiltering();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;

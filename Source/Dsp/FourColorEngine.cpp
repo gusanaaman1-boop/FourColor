@@ -17,20 +17,30 @@ namespace fourcolor
         }
 
         dryBuffer.setSize (numChannels, maxBlockSize);
+        mixDryBuffer.setSize (numChannels, maxBlockSize);
+        apRefBuffer.setSize (numChannels, maxBlockSize);
+
+        autoLevel.prepare (sampleRate);
 
         const int maxDelay = (int) std::ceil (bands[0].getNonlinearStage().getMaxLatencySamples()) + 8;
         const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) maxBlockSize,
                                             (juce::uint32) numChannels };
         dryDelay.setMaximumDelayInSamples (maxDelay);
         dryDelay.prepare (spec);
+        mixDryDelay.setMaximumDelayInSamples (maxDelay);
+        mixDryDelay.prepare (spec);
         wetAlign.setMaximumDelayInSamples (8);
         wetAlign.prepare (spec);
+
+        for (auto& t : tiltSplit)
+            t.setCutoff (sampleRate, 800.0f);
 
         const double fastSmooth = 0.02;
         inputGain .reset (sampleRate, fastSmooth);
         outputGain.reset (sampleRate, fastSmooth);
         mixSmoothed.reset (sampleRate, fastSmooth);
         bypassFade .reset (sampleRate, 0.01);
+        tiltHighGain.reset (sampleRate, 0.05);
 
         updateLatency();
         reset();
@@ -45,6 +55,7 @@ namespace fourcolor
 
         wetAlign.setDelay (wetAlignDelay);
         dryDelay.setDelay ((float) latencySamples);
+        mixDryDelay.setDelay ((float) latencySamples);
     }
 
     void FourColorEngine::reset()
@@ -56,8 +67,15 @@ namespace fourcolor
             bb.clear();
 
         dryBuffer.clear();
+        mixDryBuffer.clear();
+        apRefBuffer.clear();
         dryDelay.reset();
+        mixDryDelay.reset();
         wetAlign.reset();
+        autoLevel.reset();
+
+        for (auto& t : tiltSplit)
+            t.reset();
 
         inputGain .setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.inputDb));
         outputGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.outputDb));
@@ -73,6 +91,11 @@ namespace fourcolor
         outputGain.setTargetValue (juce::Decibels::decibelsToGain (p.outputDb));
         mixSmoothed.setTargetValue (p.mixPercent * 0.01f);
         bypassFade .setTargetValue (p.bypassed ? 1.0f : 0.0f);
+
+        //  Global Tone: +/-6 dB tilt; the low side gets the reciprocal.
+        tiltHighGain.setTargetValue (std::pow (10.0f, (p.globalTone * 0.01f) * 6.0f / 20.0f));
+
+        autoLevel.setEnabled (p.autoLevel);
 
         crossover.setFrequencies (p.xoverHz[0], p.xoverHz[1], p.xoverHz[2]);
 
@@ -93,9 +116,13 @@ namespace fourcolor
         {
             qualityChanged = bands[b].setQuality (p.quality) || qualityChanged;
 
+            //  Global Drive scales the four RELATIVE band drives around their
+            //  values: 50 is neutral, 0 silences the drive, 100 doubles it.
+            const float driveScale = p.globalDrive / 50.0f;
+
             BandProcessor::Settings s;
             s.color        = p.bands[b].color;
-            s.drivePercent = p.bands[b].drive;
+            s.drivePercent = juce::jlimit (0.0f, 100.0f, p.bands[b].drive * driveScale);
             s.behavior     = p.bands[b].behavior * 0.01f;
             s.tone         = p.bands[b].tone * 0.01f;
             s.spacePercent = p.bands[b].space;
@@ -135,7 +162,8 @@ namespace fourcolor
                 buffer.getWritePointer (c)[i] *= g;
         }
 
-        //  Dry tap, delayed by the reported (integer) latency.
+        //  True-dry tap, delayed by the reported (integer) latency - this is
+        //  what global bypass returns.
         for (int c = 0; c < chans; ++c)
         {
             auto* src = buffer.getReadPointer (c);
@@ -147,8 +175,23 @@ namespace fourcolor
             }
         }
 
-        //  Split, process each band, recombine.
-        crossover.process (buffer, bandBuffers);
+        //  Loudness reference for Auto Level: the wet chain's own input.
+        autoLevel.measureInput (buffer, n, chans);
+
+        //  Split, process each band, recombine. The crossover also emits its
+        //  allpass reference - the phase-matched dry leg for Mix.
+        crossover.process (buffer, bandBuffers, &apRefBuffer);
+
+        for (int c = 0; c < chans; ++c)
+        {
+            auto* src = apRefBuffer.getReadPointer (c);
+            auto* dst = mixDryBuffer.getWritePointer (c);
+            for (int i = 0; i < n; ++i)
+            {
+                mixDryDelay.pushSample (c, src[i]);
+                dst[i] = mixDryDelay.popSample (c);
+            }
+        }
 
         for (int b = 0; b < numBands; ++b)
         {
@@ -162,6 +205,24 @@ namespace fourcolor
         for (int b = 0; b < numBands; ++b)
             for (int c = 0; c < chans; ++c)
                 buffer.addFrom (c, 0, bandBuffers[b], c, 0, n);
+
+        //  Global Tone: tilt around 800 Hz. The low side gets the reciprocal
+        //  gain so the tilt pivots rather than just shelving.
+        for (int i = 0; i < n; ++i)
+        {
+            const float hg = tiltHighGain.getNextValue();
+            const float lg = 1.0f / hg;
+
+            for (int c = 0; c < chans; ++c)
+            {
+                auto* d = buffer.getWritePointer (c);
+                const float low = tiltSplit[c].process (d[i]);
+                d[i] = low * lg + (d[i] - low) * hg;
+            }
+        }
+
+        //  Auto Level: slow bounded internal match against the measured input.
+        autoLevel.apply (buffer, n, chans);
 
         //  Fractional wet alignment: wet total latency becomes exactly the
         //  integer reported to the host.
@@ -178,7 +239,8 @@ namespace fourcolor
             }
         }
 
-        //  Latency-compensated dry/wet, output trim, global bypass.
+        //  Latency-compensated dry/wet (against the phase-matched dry leg),
+        //  output trim, global bypass (against the TRUE dry).
         for (int i = 0; i < n; ++i)
         {
             const float mix  = mixSmoothed.getNextValue();
@@ -187,11 +249,12 @@ namespace fourcolor
 
             for (int c = 0; c < chans; ++c)
             {
-                const float dry = dryBuffer.getSample (c, i);
-                const float wet = buffer.getSample (c, i);
+                const float trueDry = dryBuffer.getSample (c, i);
+                const float mixDry  = mixDryBuffer.getSample (c, i);
+                const float wet     = buffer.getSample (c, i);
 
-                const float mixed = (dry + mix * (wet - dry)) * gOut;
-                buffer.setSample (c, i, mixed + byp * (dry - mixed));
+                const float mixed = (mixDry + mix * (wet - mixDry)) * gOut;
+                buffer.setSample (c, i, mixed + byp * (trueDry - mixed));
             }
         }
 

@@ -16,6 +16,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "../Core/ParameterIds.h"
+#include "AutoLevel.h"
 #include "BandProcessor.h"
 #include "Crossover.h"
 
@@ -84,14 +85,27 @@ namespace fourcolor
 
         Crossover crossover;
         BandProcessor bands[numBands];
+        AutoLevel autoLevel;
 
         juce::AudioBuffer<float> bandBuffers[numBands];
-        juce::AudioBuffer<float> dryBuffer;
+        juce::AudioBuffer<float> dryBuffer;      // TRUE dry (for global bypass)
+        juce::AudioBuffer<float> mixDryBuffer;   // allpassed dry (for Mix)
+        juce::AudioBuffer<float> apRefBuffer;    // crossover's allpass reference
 
         juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> dryDelay;
+        //  The Mix dry leg is the crossover's ALLPASS REFERENCE, not the raw
+        //  input: the wet sum carries the crossover's phase rotation, and
+        //  mixing raw dry against it would comb around the crossover points
+        //  no matter how exact the delay alignment is. Global bypass still
+        //  uses the true dry path.
+        juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::None> mixDryDelay;
         //  Thiran for magnitude-flat fractional alignment (see BandProcessor.h).
         juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran> wetAlign;
         float wetAlignDelay = 0.0f;
+
+        //  Global Tone: a tilt around 800 Hz, +/-6 dB per side.
+        dsp::OnePole tiltSplit[2];
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> tiltHighGain { 1.0f };
 
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> inputGain  { 1.0f };
         juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> outputGain { 1.0f };
