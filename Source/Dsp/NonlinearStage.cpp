@@ -141,26 +141,22 @@ namespace fourcolor
             }
         }
 
+        //  Each engine now applies its own static make-up internally, inside
+        //  its dry/wet blend, so that Drive 0 is exactly unity. Nothing is
+        //  scaled here.
         auto& incoming = *engines[(size_t) activeColor];
-        const float compIn = incoming.getCompensationGain();
 
         if (fadeSamplesLeft <= 0)
         {
             for (int c = 0; c < chans; ++c)
-            {
-                auto* d = osBlock.getChannelPointer ((size_t) c);
-                incoming.processBlock (d, osSamples, c, mod[c]);
-
-                //  Static make-up so Drive changes colour more than loudness.
-                juce::FloatVectorOperations::multiply (d, compIn, osSamples);
-            }
+                incoming.processBlock (osBlock.getChannelPointer ((size_t) c),
+                                       osSamples, c, mod[c]);
         }
         else
         {
             //  Equal-power crossfade in the oversampled domain: outgoing engine
             //  on a copy, incoming on the block, blended per sample.
             auto& outgoing = *engines[(size_t) fadingFrom];
-            const float compOut = outgoing.getCompensationGain();
             const int fadeLenOs = fadeLengthSamples * factor;
             const int leftAtStart = fadeSamplesLeft * factor;
 
@@ -174,20 +170,13 @@ namespace fourcolor
                 outgoing.processBlock (s, osSamples, c, mod[c]);
 
                 int left = leftAtStart;
-                for (int i = 0; i < osSamples; ++i)
+                for (int i = 0; i < osSamples && left > 0; ++i)
                 {
-                    if (left > 0)
-                    {
-                        const float t = 1.0f - (float) left / (float) fadeLenOs;   // 0 -> 1
-                        const float a = std::sin (t * juce::MathConstants<float>::halfPi);
-                        const float b = std::cos (t * juce::MathConstants<float>::halfPi);
-                        d[i] = a * d[i] * compIn + b * s[i] * compOut;
-                        --left;
-                    }
-                    else
-                    {
-                        d[i] *= compIn;
-                    }
+                    const float t = 1.0f - (float) left / (float) fadeLenOs;   // 0 -> 1
+                    const float a = std::sin (t * juce::MathConstants<float>::halfPi);
+                    const float b = std::cos (t * juce::MathConstants<float>::halfPi);
+                    d[i] = a * d[i] + b * s[i];
+                    --left;
                 }
             }
 

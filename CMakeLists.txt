@@ -99,6 +99,9 @@ set(FOURCOLOR_OWN_SOURCES
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Source/Tools/screenshot_tool.cpp")
     list(APPEND FOURCOLOR_OWN_SOURCES Source/Tools/screenshot_tool.cpp)
 endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Source/Tools/render_tool.cpp")
+    list(APPEND FOURCOLOR_OWN_SOURCES Source/Tools/render_tool.cpp)
+endif()
 
 set_source_files_properties(${FOURCOLOR_OWN_SOURCES}
     PROPERTIES COMPILE_OPTIONS "${FOURCOLOR_WARNING_FLAGS}")
@@ -149,6 +152,23 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Source/Tools/screenshot_tool.cpp")
         JUCE_MODAL_LOOPS_PERMITTED=1
         JUCE_DISPLAY_SPLASH_SCREEN=0)
     target_link_libraries(FourColorShot
+        PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_gui_extra
+        PUBLIC juce::juce_recommended_config_flags)
+endif()
+
+# --- offline renderer / preset fingerprint -------------------------------------
+#     build/FourColorRender_artefacts/<config>/FourColorRender --fingerprint
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Source/Tools/render_tool.cpp")
+    juce_add_console_app(FourColorRender PRODUCT_NAME "FourColorRender")
+    juce_generate_juce_header(FourColorRender)
+    target_sources(FourColorRender PRIVATE Source/Tools/render_tool.cpp ${FOURCOLOR_CORE_SOURCES})
+    target_compile_definitions(FourColorRender PUBLIC
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1
+        JUCE_DISPLAY_SPLASH_SCREEN=0)
+    target_link_libraries(FourColorRender
         PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_gui_extra
         PUBLIC juce::juce_recommended_config_flags)
 endif()

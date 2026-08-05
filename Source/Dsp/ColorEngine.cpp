@@ -8,12 +8,18 @@ namespace fourcolor
         rate = sampleRate;
         channelCount = juce::jlimit (1, maxChannels, numChannels);
         prepareInternals();
+
+        //  10 ms is short enough to feel instant and long enough that a jump
+        //  from Drive 0 to Drive 5 cannot step the output.
+        engageSmoothed.reset (rate, 0.010);
         setDrive (d01 * 100.0f);
+        engageSmoothed.setCurrentAndTargetValue (engageTarget);
         reset();
     }
 
     void ColorEngine::reset()
     {
+        engageSmoothed.setCurrentAndTargetValue (engageTarget);
         resetInternals();
     }
 
@@ -21,6 +27,15 @@ namespace fourcolor
     {
         d01 = juce::jlimit (0.0f, 1.0f, drivePercent * 0.01f);
         preGain = juce::Decibels::decibelsToGain (d01 * maxDriveDb());
+
+        //  Drive 0 means a clean pass-through: unity gain, no nonlinear
+        //  residual, no gate. Rather than a discontinuity at zero, the whole
+        //  engine fades in over the first 5% of the range on a smoothstep, so
+        //  the derivative is zero at both ends of that window.
+        const float t = juce::jlimit (0.0f, 1.0f, d01 / kEngageDrive01);
+        engageTarget = t * t * (3.0f - 2.0f * t);
+        engageSmoothed.setTargetValue (engageTarget);
+
         driveChanged();
         updateCompensation();
     }
@@ -28,22 +43,49 @@ namespace fourcolor
     void ColorEngine::updateCompensation() noexcept
     {
         //  Match the level of a -12 dBFS sine through the memoryless curve.
-        //  RMS-ish: sample the curve at a few points of the half cycle.
+        //
+        //  Measured over the FULL cycle, not the positive half: BITE and FUZZ
+        //  are asymmetric by design, and half-cycle sampling compensated them
+        //  by the wrong amount. The output's mean is removed before taking its
+        //  power because the signal path has a DC blocker after the shaper, so
+        //  the DC an asymmetric curve produces is not part of what is heard.
         constexpr float ref = 0.25f;
-        float inPower = 0.0f, outPower = 0.0f;
+        constexpr int numPoints = 64;
 
-        for (int i = 0; i < 16; ++i)
+        double outSum = 0.0, outSumSq = 0.0;
+
+        for (int i = 0; i < numPoints; ++i)
         {
-            const float phase = ((float) i + 0.5f) * (juce::MathConstants<float>::pi / 16.0f);
+            const auto phase = (float) (juce::MathConstants<double>::twoPi
+                                            * ((double) i + 0.5) / numPoints);
             const float x = ref * std::sin (phase);
             const float y = staticShape (x * preGain);
-            inPower  += x * x;
-            outPower += y * y;
+
+            if (! std::isfinite (y))
+            {
+                compensation = 1.0f;      // a curve that misbehaves gets no make-up
+                return;
+            }
+
+            outSum   += y;
+            outSumSq += (double) y * y;
         }
 
-        compensation = (outPower > 1.0e-12f) ? std::sqrt (inPower / outPower) : 1.0f;
-        //  Never boost by more than 12 dB or cut by more than 24 dB.
-        compensation = juce::jlimit (0.0631f, 3.98f, compensation);
+        const double mean    = outSum / numPoints;
+        const double outPower = juce::jmax (0.0, outSumSq / numPoints - mean * mean);
+        const double inPower  = 0.5 * (double) ref * ref;   // a zero-mean sine
+
+        if (outPower < 1.0e-12)
+        {
+            compensation = 1.0f;
+            return;
+        }
+
+        const auto raw = (float) std::sqrt (inPower / outPower);
+
+        //  Never boost by more than 12 dB or cut by more than 24 dB, and never
+        //  let a denormal or a NaN reach the audio path.
+        compensation = std::isfinite (raw) ? juce::jlimit (0.0631f, 3.98f, raw) : 1.0f;
     }
 
     // --- WARM -----------------------------------------------------------------
@@ -85,15 +127,17 @@ namespace fourcolor
 
         for (int i = 0; i < n; ++i)
         {
+            const float x = data[i];
             const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
 
             //  Sag eases the drive as the (driven) level stays high, which is
-            //  the "program-dependent" part of the warmth.
-            const float level = c.sagEnv.process (std::abs (data[i] * g));
+            //  the "program-dependent" part of the warmth. It keeps tracking
+            //  even while the engine is faded out, so engaging never jumps.
+            const float level = c.sagEnv.process (std::abs (x * g));
             const float sag   = 1.0f - sagDepth * juce::jmin (1.0f, level);
 
-            const float u = data[i] * g * sag + bias;
-            data[i] = c.dc.process (rationalSoft (u) - biasOut);
+            const float u = x * g * sag + bias;
+            data[i] = blend (x, c.dc.process (rationalSoft (u) - biasOut));
         }
     }
 
@@ -142,7 +186,7 @@ namespace fourcolor
             const float y = std::tanh (v);
 
             c.lastOut = y;
-            data[i] = c.dc.process (y);
+            data[i] = blend (data[i], c.dc.process (y));
         }
     }
 
@@ -191,8 +235,9 @@ namespace fourcolor
 
         for (int i = 0; i < n; ++i)
         {
+            const float x = data[i];
             const float g = preGain * (mod != nullptr ? mod[i] : 1.0f);
-            float u = data[i] * g;
+            float u = x * g;
 
             //  Internal pre-emphasis: push the upper mids INTO the clipper...
             u += emphasis * c.preHp.processHigh (u);
@@ -203,7 +248,7 @@ namespace fourcolor
             //  is "distorted brighter" rather than just "brighter".
             y -= deemph * c.postHp.processHigh (y);
 
-            data[i] = c.dc.process (y);
+            data[i] = blend (x, c.dc.process (y));
         }
     }
 
@@ -269,7 +314,9 @@ namespace fourcolor
             v = foldOnce (foldOnce (v));
             v = juce::jlimit (-1.0f, 1.0f, v);
 
-            data[i] = c.dc.process (v * gate);
+            //  At Drive 0 the blend returns x, so the gate is inaudible there
+            //  even though its envelope keeps tracking.
+            data[i] = blend (x, c.dc.process (v * gate));
         }
     }
 

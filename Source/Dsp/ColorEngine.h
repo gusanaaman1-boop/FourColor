@@ -42,11 +42,30 @@ namespace fourcolor
 
         //  Static make-up so Drive changes colour more than loudness. Derived
         //  from each engine's memoryless curve at a -12 dBFS reference input.
+        //  The engine applies this itself, inside the dry/wet blend below, so
+        //  that Drive = 0 is exactly unity.
         float getCompensationGain() const noexcept { return compensation; }
+
+        //  0 at Drive = 0, 1 from Drive = 5% upwards. See kEngageDrive01.
+        float getEngageTarget() const noexcept { return engageTarget; }
 
         virtual ColorType type() const noexcept = 0;
 
+        //  Drive below this fraction fades the whole engine out; at and above
+        //  it the engine is fully engaged and behaves exactly as before, so no
+        //  preset with Drive > 5% is affected by the contract.
+        static constexpr float kEngageDrive01 = 0.05f;
+
     protected:
+        //  The one place the dry/wet contract is expressed. `wet` is the
+        //  engine's compensated output; at Drive 0 this returns x untouched,
+        //  bit for bit, with no residual, no gate and no DC filtering.
+        float blend (float x, float wet) noexcept
+        {
+            const float e = engageSmoothed.getNextValue();
+            return x + e * (wet * compensation - x);
+        }
+
         virtual void prepareInternals() = 0;
         virtual void resetInternals() = 0;
         virtual void driveChanged() noexcept {}
@@ -63,6 +82,11 @@ namespace fourcolor
         float d01 = 0.25f;
         float preGain = 1.0f;
         float compensation = 1.0f;
+        float engageTarget = 1.0f;
+
+        //  Smoothed per sample: a block-rate step in the blend would be an
+        //  audible click on a fast Drive automation ramp through the low end.
+        juce::SmoothedValue<float> engageSmoothed { 1.0f };
 
         static constexpr int maxChannels = 2;
 
