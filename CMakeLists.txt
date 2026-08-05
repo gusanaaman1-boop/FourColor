@@ -74,6 +74,7 @@ juce_add_plugin(FourColor
 # Files are added here phase by phase as they come into existence.
 set(FOURCOLOR_CORE_SOURCES
     Source/Core/PresetLibrary.cpp
+    Source/Core/StateMigration.cpp
     Source/Dsp/AutoLevel.cpp
     Source/Dsp/BandProcessor.cpp
     Source/Dsp/BehaviorDetector.cpp

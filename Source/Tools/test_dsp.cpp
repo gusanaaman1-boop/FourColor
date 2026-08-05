@@ -15,6 +15,8 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "../Core/ParameterIds.h"
+#include "../Core/PresetLibrary.h"
+#include "../Core/StateMigration.h"
 #include "../Dsp/ColorEngine.h"
 #include "../Dsp/Crossover.h"
 #include "../Dsp/NonlinearStage.h"
@@ -2057,6 +2059,273 @@ namespace
 }
 
 // ================================================================================
+//  Phase 13: state versioning, migration and hostile input
+// ================================================================================
+namespace
+{
+    //  Every parameter's current value, for exact round-trip comparison.
+    std::vector<float> snapshotParameters (const FourColorProcessor& proc)
+    {
+        std::vector<float> values;
+        for (auto* p : proc.getParameters())
+            values.push_back (p->getValue());
+        return values;
+    }
+
+    File fixtureDir()
+    {
+        //  The suite runs from the build tree; walk up to the project root.
+        auto dir = File::getSpecialLocation (File::currentExecutableFile);
+        for (int i = 0; i < 8; ++i)
+        {
+            dir = dir.getParentDirectory();
+            auto candidate = dir.getChildFile ("Tests").getChildFile ("fixtures");
+            if (candidate.isDirectory())
+                return candidate;
+        }
+        return {};
+    }
+}
+
+static void testStateVersioningAndMigration()
+{
+    section ("Phase 13: state versioning, migration and hostile input");
+
+    //  --- exact round trip, every preset -----------------------------------------
+    {
+        int worstMismatches = 0;
+        for (int preset = 0; preset < PresetLibrary::numPresets(); ++preset)
+        {
+            FourColorProcessor a;
+            a.setPlayConfigDetails (2, 2, 48000.0, 512);
+            a.prepareToPlay (48000.0, 512);
+            a.setCurrentProgram (preset);
+            const auto before = snapshotParameters (a);
+
+            MemoryBlock block;
+            a.getStateInformation (block);
+
+            FourColorProcessor b;
+            b.setPlayConfigDetails (2, 2, 48000.0, 512);
+            b.prepareToPlay (48000.0, 512);
+            b.setStateInformation (block.getData(), (int) block.getSize());
+            const auto after = snapshotParameters (b);
+
+            int mismatches = 0;
+            for (size_t i = 0; i < before.size(); ++i)
+                if (std::abs (before[i] - after[i]) > 1.0e-6f)
+                    ++mismatches;
+            worstMismatches = jmax (worstMismatches, mismatches);
+        }
+
+        check (worstMismatches == 0,
+               "all " + String (PresetLibrary::numPresets())
+                   + " presets round-trip with no parameter mismatch (worst "
+                   + String (worstMismatches) + ")");
+    }
+
+    //  --- the version tag is written, and a v0 state still loads -----------------
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        proc.prepareToPlay (48000.0, 512);
+
+        MemoryBlock block;
+        proc.getStateInformation (block);
+        auto tree = ValueTree::readFromData (block.getData(), block.getSize());
+
+        check ((int) tree.getProperty (state::versionProperty, -1) == state::currentVersion,
+               "saved state carries stateVersion " + String (state::currentVersion));
+
+        //  Strip the tag: that is precisely what a pre-versioning state is.
+        auto legacy = tree.createCopy();
+        legacy.removeProperty (state::versionProperty, nullptr);
+        legacy.removeProperty (state::editorWidthProperty, nullptr);
+        legacy.removeProperty (state::editorHeightProperty, nullptr);
+
+        auto migrated = legacy.createCopy();
+        const auto result = state::migrate (migrated, proc.apvts);
+
+        check (result.usable && result.fromVersion == 0,
+               "an untagged state is recognised as v0 and is loadable");
+        check ((int) migrated.getProperty (state::versionProperty, -1) == state::currentVersion,
+               "migration stamps the current version");
+        check (migrated.hasProperty (state::editorWidthProperty)
+                   && migrated.hasProperty (state::editorHeightProperty),
+               "migration fills in editor properties a v0 state never had");
+    }
+
+    //  --- a state from the future keeps what we do not understand ----------------
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        proc.prepareToPlay (48000.0, 512);
+
+        MemoryBlock block;
+        proc.getStateInformation (block);
+        auto future = ValueTree::readFromData (block.getData(), block.getSize());
+        future.setProperty (state::versionProperty, state::currentVersion + 7, nullptr);
+        future.setProperty ("somethingFromTheFuture", "keep me", nullptr);
+
+        ValueTree unknownParam ("PARAM");
+        unknownParam.setProperty ("id", "b0_notInThisBuild", nullptr);
+        unknownParam.setProperty ("value", 0.5, nullptr);
+        future.appendChild (unknownParam, nullptr);
+
+        const auto result = state::migrate (future, proc.apvts);
+
+        check (result.usable, "a state from a newer version still loads");
+        check (future.getProperty ("somethingFromTheFuture").toString() == "keep me",
+               "an unknown property survives migration");
+        check (future.getChildWithProperty ("id", "b0_notInThisBuild").isValid(),
+               "an unknown PARAM survives migration instead of being deleted");
+        check ((int) future.getProperty (state::versionProperty) == state::currentVersion + 7,
+               "a future version number is not downgraded");
+    }
+
+    //  --- hostile input ----------------------------------------------------------
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        proc.prepareToPlay (48000.0, 512);
+        proc.setCurrentProgram (3);
+        const auto reference = snapshotParameters (proc);
+
+        //  1. Not a state tree at all.
+        const char junk[] = "this is not a ValueTree, not even close";
+        proc.setStateInformation (junk, (int) sizeof (junk));
+        check (snapshotParameters (proc) == reference,
+               "garbage input leaves every parameter untouched");
+
+        //  2. Empty and null.
+        proc.setStateInformation (nullptr, 0);
+        proc.setStateInformation (junk, 0);
+        check (snapshotParameters (proc) == reference,
+               "null or empty state leaves every parameter untouched");
+
+        //  3. A real tree carrying NaN, infinity and out-of-range values.
+        MemoryBlock block;
+        proc.getStateInformation (block);
+        auto poisoned = ValueTree::readFromData (block.getData(), block.getSize());
+
+        auto poison = [&poisoned] (const String& id, double value)
+        {
+            auto child = poisoned.getChildWithProperty ("id", id);
+            if (child.isValid())
+                child.setProperty ("value", value, nullptr);
+        };
+        poison (param::band (0, param::drive), std::numeric_limits<double>::quiet_NaN());
+        poison (param::band (1, param::drive), std::numeric_limits<double>::infinity());
+        poison (param::band (2, param::level), 1.0e9);
+        poison (param::input, -1.0e9);
+        poison (param::xover1, std::numeric_limits<double>::quiet_NaN());
+
+        MemoryBlock poisonedBlock;
+        {
+            MemoryOutputStream stream (poisonedBlock, false);
+            poisoned.writeToStream (stream);
+        }
+        proc.setStateInformation (poisonedBlock.getData(), (int) poisonedBlock.getSize());
+
+        bool allFinite = true;
+        for (auto* p : proc.getParameters())
+            allFinite = allFinite && std::isfinite (p->getValue());
+
+        check (allFinite, "a state carrying NaN and infinity produces no non-finite parameter");
+
+        //  And the plug-in still makes sound rather than silence or garbage.
+        MidiBuffer midi;
+        AudioBuffer<float> io (2, 512);
+        for (int i = 0; i < 512; ++i)
+            for (int c = 0; c < 2; ++c)
+                io.setSample (c, i, 0.25f * (float) std::sin (0.05 * i));
+        proc.processBlock (io, midi);
+
+        check (allFinite && ::allFinite (io),
+               "the plug-in still processes cleanly after a poisoned state");
+    }
+
+    //  --- golden fixtures on disk -------------------------------------------------
+    {
+        const auto dir = fixtureDir();
+        if (! dir.isDirectory())
+        {
+            check (false, "Tests/fixtures was found (run FourColorRender --write-state-fixtures)");
+        }
+        else
+        {
+            auto files = dir.findChildFiles (File::findFiles, false, "*.fcstate");
+            files.sort();
+
+            check (files.size() >= 7,
+                   "golden state fixtures present (" + String (files.size()) + ")");
+
+            int loaded = 0, failed = 0;
+            for (const auto& f : files)
+            {
+                MemoryBlock block;
+                f.loadFileAsData (block);
+
+                FourColorProcessor proc;
+                proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+                proc.prepareToPlay (48000.0, 512);
+
+                auto tree = ValueTree::readFromData (block.getData(), block.getSize());
+                const auto result = state::migrate (tree, proc.apvts);
+
+                if (! result.usable) { ++failed; continue; }
+
+                proc.setStateInformation (block.getData(), (int) block.getSize());
+
+                bool ok = true;
+                for (auto* p : proc.getParameters())
+                    ok = ok && std::isfinite (p->getValue());
+
+                if (ok) ++loaded; else ++failed;
+            }
+
+            std::printf ("      fixtures: %d loaded, %d failed\n", loaded, failed);
+            check (failed == 0 && loaded == files.size(),
+                   "every golden fixture still loads (" + String (loaded) + "/"
+                       + String (files.size()) + ")");
+        }
+    }
+
+    //  --- nothing from the audio path is saved ------------------------------------
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        proc.prepareToPlay (48000.0, 512);
+
+        MemoryBlock block;
+        proc.getStateInformation (block);
+        auto tree = ValueTree::readFromData (block.getData(), block.getSize());
+
+        //  The tree is exactly: PARAM children, the version, and three editor
+        //  properties. Anything else would be state that has no business being
+        //  written to a session file.
+        StringArray unexpected;
+        for (int i = 0; i < tree.getNumProperties(); ++i)
+        {
+            const auto name = tree.getPropertyName (i).toString();
+            if (name != state::versionProperty && name != state::selectedBandProperty
+                && name != state::editorWidthProperty && name != state::editorHeightProperty)
+                unexpected.add (name);
+        }
+
+        int nonParamChildren = 0;
+        for (int i = 0; i < tree.getNumChildren(); ++i)
+            if (! tree.getChild (i).hasType ("PARAM"))
+                ++nonParamChildren;
+
+        check (unexpected.isEmpty() && nonParamChildren == 0,
+               "saved state holds only parameters and editor properties (extras: "
+                   + (unexpected.isEmpty() ? String ("none") : unexpected.joinIntoString (", "))
+                   + ", non-PARAM children: " + String (nonParamChildren) + ")");
+    }
+}
+
+// ================================================================================
 //  Phase 11: Drive 0 is a clean pass-through
 // ================================================================================
 namespace
@@ -2836,7 +3105,7 @@ static void testAnalyzerCpu()
 
 static void testColorContext()
 {
-    section ("Phase 13: colour engines know where they are");
+    section ("ColorContext: colour engines know where they are");
 
     const double sr = 48000.0;
     const int    block = 256;
@@ -3080,6 +3349,7 @@ int main()
 
     testParameterLayout();
     testStateRecall();
+    testStateVersioningAndMigration();
     testPassthroughAndSafety();
     testNoAllocationInProcess();
 

@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Core/PresetLibrary.h"
+#include "Core/StateMigration.h"
 
 namespace fourcolor
 {
@@ -347,17 +348,30 @@ namespace fourcolor
     // --- state -------------------------------------------------------------------
     void FourColorProcessor::getStateInformation (juce::MemoryBlock& destData)
     {
+        //  Parameters plus a few editor properties. Nothing from the audio path
+        //  is written: no pointers, no buffers, no analyzer data.
         auto state = apvts.copyState();
+        state::stampVersion (state);
+
         juce::MemoryOutputStream stream (destData, false);
         state.writeToStream (stream);
     }
 
     void FourColorProcessor::setStateInformation (const void* data, int sizeInBytes)
     {
+        if (data == nullptr || sizeInBytes <= 0)
+            return;
+
         auto tree = juce::ValueTree::readFromData (data, (size_t) sizeInBytes);
 
-        if (tree.isValid() && tree.hasType (apvts.state.getType()))
-            apvts.replaceState (tree);
+        //  A state that cannot be migrated leaves the plug-in exactly as it
+        //  was. Refusing to load is always better than loading half of it.
+        const auto result = state::migrate (tree, apvts);
+        if (! result.usable)
+            return;
+
+        apvts.replaceState (tree);
+        presetDirty.store (false);
     }
 
     juce::AudioProcessorEditor* FourColorProcessor::createEditor()

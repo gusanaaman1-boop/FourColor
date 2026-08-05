@@ -15,6 +15,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "../Core/PresetLibrary.h"
+#include "../Core/StateMigration.h"
 #include "../PluginProcessor.h"
 
 using namespace juce;
@@ -125,21 +126,83 @@ namespace
     }
 }
 
+namespace
+{
+    //  Writes the golden state fixtures the suite loads back. Regenerating them
+    //  is a deliberate act: if a change makes a fixture stop loading, that is
+    //  the compatibility break the fixtures exist to catch, and the fix belongs
+    //  in the migration chain, not here.
+    int writeStateFixtures (const File& dir)
+    {
+        dir.createDirectory();
+
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        proc.prepareToPlay (48000.0, 512);
+
+        auto write = [&dir] (const String& name, const MemoryBlock& data)
+        {
+            auto f = dir.getChildFile (name);
+            f.replaceWithData (data.getData(), data.getSize());
+            std::printf ("  wrote %s (%d bytes)\n", f.getFullPathName().toRawUTF8(),
+                         (int) data.getSize());
+        };
+
+        //  A handful of presets that between them touch every engine.
+        const int wanted[] = { 0, 1, 6, 12, 18, 24 };
+        for (int index : wanted)
+        {
+            if (index >= PresetLibrary::numPresets())
+                continue;
+
+            proc.setCurrentProgram (index);
+            MemoryBlock block;
+            proc.getStateInformation (block);
+            write ("preset-" + String (index).paddedLeft ('0', 2) + ".fcstate", block);
+        }
+
+        //  A v0 state: exactly what every build before state versioning wrote,
+        //  which is the tree with no version property at all.
+        proc.setCurrentProgram (1);
+        {
+            auto tree = proc.apvts.copyState();
+            tree.removeProperty (state::versionProperty, nullptr);
+            tree.removeProperty (state::editorWidthProperty, nullptr);
+            tree.removeProperty (state::editorHeightProperty, nullptr);
+
+            MemoryBlock block;
+            MemoryOutputStream stream (block, false);
+            tree.writeToStream (stream);
+            stream.flush();
+            write ("legacy-v0.fcstate", block);
+        }
+
+        return 0;
+    }
+}
+
 int main (int argc, char* argv[])
 {
     ScopedJuceInitialiser_GUI juceInit;
 
     bool csv = false, fingerprint = false;
+    String fixtureDir;
+
     for (int i = 1; i < argc; ++i)
     {
         const String arg (argv[i]);
         if (arg == "--csv") csv = true;
         else if (arg == "--fingerprint") fingerprint = true;
+        else if (arg == "--write-state-fixtures" && i + 1 < argc) fixtureDir = argv[++i];
     }
+
+    if (fixtureDir.isNotEmpty())
+        return writeStateFixtures (File::getCurrentWorkingDirectory().getChildFile (fixtureDir));
 
     if (! fingerprint)
     {
-        std::printf ("usage: FourColorRender --fingerprint [--csv]\n");
+        std::printf ("usage: FourColorRender --fingerprint [--csv]\n"
+                     "       FourColorRender --write-state-fixtures <dir>\n");
         return 2;
     }
 
