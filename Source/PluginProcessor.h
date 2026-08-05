@@ -45,6 +45,16 @@ namespace fourcolor
 
         FourColorEngine& getEngine() noexcept { return engine; }
 
+        //  --- UI services ---------------------------------------------------------
+        //  Block-peak meters (atomics written on the audio thread).
+        float readAndResetInputPeak() noexcept  { return inputPeak.exchange (0.0f); }
+        float readAndResetOutputPeak() noexcept { return outputPeak.exchange (0.0f); }
+
+        //  A/B compare (message thread only): two full-state slots.
+        void toggleAB();
+        void copyABToOther();
+        int getABIndex() const noexcept { return abIndex; }
+
         static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     private:
@@ -85,6 +95,11 @@ namespace fourcolor
 
         FourColorEngine engine;
         int currentProgram = 0;
+
+        std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
+
+        juce::MemoryBlock abSlots[2];
+        int abIndex = 0;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FourColorProcessor)
     };

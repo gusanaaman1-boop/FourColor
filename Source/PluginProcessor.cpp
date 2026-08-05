@@ -210,14 +210,47 @@ namespace fourcolor
         for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
             buffer.clear (ch, 0, buffer.getNumSamples());
 
+        //  Input meter (block peak, lock-free).
+        float peak = 0.0f;
+        for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
+            peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
+        if (peak > inputPeak.load (std::memory_order_relaxed))
+            inputPeak.store (peak, std::memory_order_relaxed);
+
         pushParametersToEngine();
         engine.process (buffer);
+
+        peak = 0.0f;
+        for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
+            peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
+        if (peak > outputPeak.load (std::memory_order_relaxed))
+            outputPeak.store (peak, std::memory_order_relaxed);
 
         //  Quality changes alter the oversampler latency; JUCE forwards this
         //  to the host asynchronously.
         const int latency = engine.getLatencySamples();
         if (latency != getLatencySamples())
             setLatencySamples (latency);
+    }
+
+    // --- A/B compare (message thread) ---------------------------------------------
+    void FourColorProcessor::toggleAB()
+    {
+        //  Store the live state into the current slot, then load the other
+        //  slot if it holds anything.
+        abSlots[abIndex].reset();
+        getStateInformation (abSlots[abIndex]);
+
+        abIndex = 1 - abIndex;
+
+        if (abSlots[abIndex].getSize() > 0)
+            setStateInformation (abSlots[abIndex].getData(), (int) abSlots[abIndex].getSize());
+    }
+
+    void FourColorProcessor::copyABToOther()
+    {
+        abSlots[1 - abIndex].reset();
+        getStateInformation (abSlots[1 - abIndex]);
     }
 
     juce::AudioProcessorParameter* FourColorProcessor::getBypassParameter() const
