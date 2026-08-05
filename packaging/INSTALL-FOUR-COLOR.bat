@@ -52,29 +52,55 @@ call :try "%USERPROFILE%\Desktop\FourColor\build-win\FourColor_artefacts\Release
 call :try "C:\dev\FourColor\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
 
 if not defined SRC (
-    echo        not in the usual places - searching nearby folders...
+    echo        not in the usual places - searching. This can take a minute.
     call :search "%~dp0"
 )
 if not defined SRC call :search "%USERPROFILE%\Desktop"
 if not defined SRC call :search "%USERPROFILE%\Downloads"
+if not defined SRC call :search "%USERPROFILE%\Documents"
 if not defined SRC call :search "C:\dev"
+REM The whole user profile last: slowest, but it covers wherever the build
+REM actually happened, which is the thing the previous version got wrong.
+if not defined SRC call :search "%USERPROFILE%"
+if not defined SRC call :search "C:\Users\Public"
 
 REM --- still nothing: ask for it ------------------------------------------------
+:askagain
 if not defined SRC (
     echo.
-    echo  [?] I could not find FourColor.vst3 by myself.
+    echo  ==========================================================
+    echo   I could not find FourColor.vst3 anywhere I know to look.
     echo.
-    echo      Open the folder where you BUILT it, go into
-    echo         build-win \ FourColor_artefacts \ Release \ VST3
-    echo      and DRAG the FourColor.vst3 folder into this window,
-    echo      then press Enter.
+    echo   DRAG IT INTO THIS WINDOW.
     echo.
-    echo      (Or just press Enter to give up.)
+    echo   Where to find it: open the folder you built in, then
+    echo      build-win  then  FourColor_artefacts  then
+    echo      Release  then  VST3
+    echo   and drag the FourColor.vst3 FOLDER onto this window.
+    echo   Then press Enter.
     echo.
-    set /p "DROPPED=Path: "
+    echo   Press Enter on its own to give up.
+    echo  ==========================================================
+    echo.
+    set "DROPPED="
+    set /p "DROPPED=Drag it here: "
+
     if defined DROPPED (
         set "DROPPED=!DROPPED:"=!"
-        if exist "!DROPPED!\Contents" set "SRC=!DROPPED!"
+        echo dropped: !DROPPED!>> "%LOG%"
+
+        if exist "!DROPPED!\Contents" (
+            set "SRC=!DROPPED!"
+        ) else if exist "!DROPPED!\FourColor.vst3\Contents" (
+            REM they dragged the parent folder - accept that too
+            set "SRC=!DROPPED!\FourColor.vst3"
+        ) else (
+            echo.
+            echo   That is not a FourColor.vst3 bundle:
+            echo   !DROPPED!
+            echo   It should be a FOLDER containing a Contents folder.
+            goto :askagain
+        )
     )
 )
 
