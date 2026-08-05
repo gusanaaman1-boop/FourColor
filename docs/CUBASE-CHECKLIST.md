@@ -1,19 +1,33 @@
 # FOUR COLOR — Cubase 15 host validation checklist
 
-**STATUS: WINDOWS/CUBASE NOT VERIFIED.**
-No machine in this workspace runs Windows or Cubase. Nothing in this document has been
-executed. Every row below is `[ ]` until somebody runs it on the target host and fills in
-the result, the date and the build hash. Do not mark a row `PASS` from a macOS run.
+**STATUS: NOT YET RUN.**
 
-Target: **Cubase 15, Windows 11 x64**, VST3 built by `scripts\build-windows.bat Release`.
+Correcting an earlier claim in this file: **Cubase 15 is installed on this Mac**
+(`/Applications/Cubase 15.app`). What is missing is **Windows**, not Cubase. So this
+checklist has two columns, and they are not interchangeable:
 
-| Field | Value |
-| --- | --- |
-| Build hash | _fill in_ |
-| Cubase version | _fill in_ |
-| Windows build | _fill in_ |
-| Audio device / driver | _fill in_ |
-| Tester / date | _fill in_ |
+| Column | What it proves | Status |
+| --- | --- | --- |
+| **macOS** | The VST3/AU is correct as a plug-in: scan, state, automation, PDC, offline export | Possible here, not yet run |
+| **Windows** | The same on the platform the product actually ships to (MSVC codegen, WASAPI/ASIO, Program Files paths) | **Impossible here — no Windows machine** |
+
+A green macOS column does **not** license a Windows claim. Keep them separate.
+
+Every row is `[ ]` until somebody runs it and fills in the result, the date and the build
+hash. `auval -v aufx Fclr Naam` passes on the current build (f9b596e), but auval is not
+Cubase and does not cover any row below.
+
+| Field | macOS run | Windows run |
+| --- | --- | --- |
+| Build hash | _fill in_ | _fill in_ |
+| Cubase version | _fill in_ | _fill in_ |
+| OS build | _fill in_ | _fill in_ |
+| Audio device / driver | _fill in_ | _fill in_ |
+| Tester / date | _fill in_ | _fill in_ |
+
+On macOS the VST3 goes to `~/Library/Audio/Plug-Ins/VST3/`, which
+`scripts/build-macos.sh --install` does. On Windows it is
+`C:\Program Files\Common Files\VST3\`, which needs administrator rights.
 
 ---
 

@@ -1,7 +1,7 @@
 # FOUR COLOR — building and validating
 
-VST3 + AU + Standalone, JUCE 9, C++20. macOS is the development machine; **Windows 11 +
-Cubase 15 is the product target**, and has never been compiled or run — see
+VST3 + AU + Standalone, JUCE 9, C++20. macOS is the development machine and runs Cubase 15;
+**Windows 11 is the product target and has never been compiled or run** — see
 [CUBASE-CHECKLIST.md](CUBASE-CHECKLIST.md).
 
 ## Pinned toolchain
