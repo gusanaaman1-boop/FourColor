@@ -1,3 +1,5 @@
+#include <functional>
+
 #include "PresetLibrary.h"
 #include "ParameterIds.h"
 
@@ -10,17 +12,297 @@ namespace fourcolor
         std::vector<std::pair<juce::String, float>> values;   // parameter ID -> plain value
     };
 
+    namespace
+    {
+        //  Terse builders so each preset below reads as a musical intent.
+        using V = std::vector<std::pair<juce::String, float>>;
+
+        void band (V& v, int b, ColorType color, float drive, float behavior = 0.0f,
+                   float tone = 0.0f, float space = 0.0f, float mix = 100.0f, float level = 0.0f)
+        {
+            namespace p = param;
+            v.emplace_back (p::band (b, p::color), (float) (int) color);
+            v.emplace_back (p::band (b, p::drive), drive);
+            v.emplace_back (p::band (b, p::behavior), behavior);
+            v.emplace_back (p::band (b, p::tone), tone);
+            v.emplace_back (p::band (b, p::space), space);
+            v.emplace_back (p::band (b, p::bandMix), mix);
+            v.emplace_back (p::band (b, p::level), level);
+        }
+
+        void bandBypass (V& v, int b) { v.emplace_back (param::band (b, param::bypass), 1.0f); }
+        void bandMute (V& v, int b)   { v.emplace_back (param::band (b, param::mute), 1.0f); }
+    }
+
     const std::vector<PresetLibrary::Preset>& PresetLibrary::presets()
     {
         static const std::vector<Preset> list = []
         {
-            std::vector<Preset> p;
+            namespace p = param;
+            std::vector<Preset> out;
 
-            // Phase 1: a single neutral preset proving the mechanism. The 24
-            // musical presets are added in Phase 9.
-            p.push_back ({ "Default", "Init", {} });
+            auto add = [&out] (const char* name, const char* category,
+                               const std::function<void (V&)>& build)
+            {
+                V v;
+                build (v);
+                out.push_back ({ name, category, std::move (v) });
+            };
 
-            return p;
+            add ("Default", "Init", [] (V&) {});
+
+            // --- BASS ---------------------------------------------------------
+            add ("Sub Weight", "Bass", [] (V& v)
+            {
+                //  Fat, round low end; transient of the sub stays clean.
+                v.emplace_back (p::xover1, 95.0f);
+                band (v, 0, ColorType::warm, 48.0f, -35.0f, -15.0f);
+                band (v, 1, ColorType::warm, 22.0f, -10.0f);
+                band (v, 2, ColorType::warm, 12.0f);
+                band (v, 3, ColorType::warm, 8.0f);
+            });
+
+            add ("Rolling Bass Body", "Bass", [] (V& v)
+            {
+                //  Saturation rides the sustain: rolling basslines thicken.
+                band (v, 0, ColorType::warm, 55.0f, -55.0f, -10.0f);
+                band (v, 1, ColorType::iron, 42.0f, -30.0f, 0.0f, 12.0f);
+                band (v, 2, ColorType::iron, 20.0f);
+                band (v, 3, ColorType::warm, 10.0f);
+            });
+
+            add ("Acid Bite", "Bass", [] (V& v)
+            {
+                //  303-style forward mids with fast grit.
+                v.emplace_back (p::xover2, 520.0f);
+                band (v, 0, ColorType::warm, 25.0f, -20.0f);
+                band (v, 1, ColorType::bite, 68.0f, 35.0f, 15.0f);
+                band (v, 2, ColorType::bite, 62.0f, 45.0f, 28.0f, 15.0f);
+                band (v, 3, ColorType::bite, 35.0f, 20.0f, 20.0f);
+            });
+
+            add ("Mid Bass Iron", "Bass", [] (V& v)
+            {
+                //  Dense, heavy mid-bass; sub politely warm.
+                band (v, 0, ColorType::warm, 28.0f, -25.0f);
+                band (v, 1, ColorType::iron, 62.0f, 10.0f, -5.0f);
+                band (v, 2, ColorType::iron, 45.0f, 10.0f);
+                band (v, 3, ColorType::warm, 12.0f);
+            });
+
+            add ("Bass Harmonic Lift", "Bass", [] (V& v)
+            {
+                //  The sub passes untouched; audible harmonics are built above
+                //  it so the bass reads on small speakers.
+                bandBypass (v, 0);
+                band (v, 1, ColorType::warm, 38.0f, 0.0f, 10.0f, 28.0f);
+                band (v, 2, ColorType::bite, 32.0f, 10.0f, 18.0f, 22.0f);
+                band (v, 3, ColorType::warm, 15.0f, 0.0f, 10.0f);
+            });
+
+            add ("Controlled Bass Fuzz", "Bass", [] (V& v)
+            {
+                //  Parallel fuzz on the mids only; the low stays solid.
+                band (v, 0, ColorType::warm, 32.0f, -30.0f);
+                band (v, 1, ColorType::fuzz, 48.0f, 0.0f, -5.0f, 0.0f, 55.0f);
+                band (v, 2, ColorType::fuzz, 38.0f, 15.0f, 0.0f, 12.0f, 50.0f);
+                band (v, 3, ColorType::warm, 10.0f);
+            });
+
+            // --- DRUMS --------------------------------------------------------
+            add ("Kick Weight", "Drums", [] (V& v)
+            {
+                //  The click stays clean; the body swells.
+                v.emplace_back (p::xover1, 105.0f);
+                band (v, 0, ColorType::warm, 58.0f, -70.0f, -12.0f);
+                band (v, 1, ColorType::iron, 30.0f, -25.0f);
+                band (v, 2, ColorType::warm, 12.0f);
+                band (v, 3, ColorType::warm, 8.0f);
+            });
+
+            add ("Kick Attack", "Drums", [] (V& v)
+            {
+                //  The beater hits harder without extra level.
+                band (v, 0, ColorType::warm, 30.0f, -20.0f);
+                band (v, 1, ColorType::bite, 42.0f, 60.0f);
+                band (v, 2, ColorType::bite, 55.0f, 68.0f, 18.0f);
+                band (v, 3, ColorType::bite, 25.0f, 40.0f, 15.0f);
+            });
+
+            add ("Drum Bus Warmth", "Drums", [] (V& v)
+            {
+                //  Gentle four-band glue voiced for a kit.
+                v.emplace_back (p::mix, 88.0f);
+                band (v, 0, ColorType::warm, 32.0f, -25.0f);
+                band (v, 1, ColorType::warm, 36.0f, -15.0f);
+                band (v, 2, ColorType::warm, 30.0f, 0.0f, 5.0f);
+                band (v, 3, ColorType::warm, 24.0f, 0.0f, 8.0f);
+            });
+
+            add ("Crunchy Loop", "Drums", [] (V& v)
+            {
+                //  Break/loop treatment: mid grit, controlled top.
+                band (v, 0, ColorType::iron, 28.0f, -20.0f);
+                band (v, 1, ColorType::iron, 38.0f);
+                band (v, 2, ColorType::bite, 60.0f, 45.0f, 12.0f);
+                band (v, 3, ColorType::bite, 44.0f, 30.0f, -8.0f);
+            });
+
+            add ("Snare Bite", "Drums", [] (V& v)
+            {
+                //  Crack forward, a breath of space on the shell.
+                band (v, 0, ColorType::warm, 15.0f);
+                band (v, 1, ColorType::warm, 25.0f, -15.0f);
+                band (v, 2, ColorType::bite, 68.0f, 62.0f, 22.0f, 15.0f);
+                band (v, 3, ColorType::bite, 40.0f, 35.0f, 10.0f, 20.0f);
+            });
+
+            add ("Parallel Fuzz Drums", "Drums", [] (V& v)
+            {
+                //  Full-range fuzz folded under the dry kit.
+                v.emplace_back (p::mix, 35.0f);
+                band (v, 0, ColorType::fuzz, 55.0f, -20.0f);
+                band (v, 1, ColorType::fuzz, 68.0f);
+                band (v, 2, ColorType::fuzz, 72.0f, 25.0f);
+                band (v, 3, ColorType::fuzz, 60.0f, 20.0f, -6.0f);
+            });
+
+            // --- SYNTHS -------------------------------------------------------
+            add ("Warm Pad", "Synths", [] (V& v)
+            {
+                //  Round, slightly dark, saturation on the sustain.
+                band (v, 0, ColorType::warm, 25.0f, -30.0f);
+                band (v, 1, ColorType::warm, 35.0f, -35.0f, -8.0f);
+                band (v, 2, ColorType::warm, 32.0f, -30.0f, -10.0f, 25.0f);
+                band (v, 3, ColorType::warm, 22.0f, -20.0f, -12.0f, 30.0f);
+            });
+
+            add ("Dirty Pad Halo", "Synths", [] (V& v)
+            {
+                //  The halo IS the preset: heavy Space on driven uppers.
+                band (v, 0, ColorType::warm, 20.0f, -20.0f);
+                band (v, 1, ColorType::iron, 40.0f, -15.0f);
+                band (v, 2, ColorType::iron, 52.0f, 0.0f, 8.0f, 60.0f);
+                band (v, 3, ColorType::bite, 42.0f, 0.0f, 15.0f, 70.0f);
+            });
+
+            add ("Melodic Lead Bite", "Synths", [] (V& v)
+            {
+                //  Present lead that cuts without simple EQ brightness.
+                band (v, 0, ColorType::warm, 12.0f);
+                band (v, 1, ColorType::warm, 28.0f, -10.0f);
+                band (v, 2, ColorType::bite, 62.0f, 32.0f, 15.0f, 18.0f);
+                band (v, 3, ColorType::bite, 38.0f, 20.0f, 28.0f, 12.0f);
+            });
+
+            add ("Dark Stab Iron", "Synths", [] (V& v)
+            {
+                //  Dense, dark, punchy chord stabs.
+                v.emplace_back (p::globalTone, -20.0f);
+                band (v, 0, ColorType::iron, 30.0f, -15.0f);
+                band (v, 1, ColorType::iron, 64.0f, 22.0f, -30.0f);
+                band (v, 2, ColorType::iron, 55.0f, 18.0f, -35.0f, 10.0f);
+                band (v, 3, ColorType::warm, 18.0f, 0.0f, -40.0f);
+            });
+
+            add ("Acid Destruction", "Synths", [] (V& v)
+            {
+                //  The creative extreme: gated fuzz mids, screaming top.
+                v.emplace_back (p::globalDrive, 62.0f);
+                band (v, 0, ColorType::iron, 35.0f, -20.0f);
+                band (v, 1, ColorType::fuzz, 78.0f, 20.0f, 5.0f);
+                band (v, 2, ColorType::fuzz, 85.0f, 45.0f, 12.0f, 30.0f);
+                band (v, 3, ColorType::bite, 58.0f, 30.0f, 20.0f, 18.0f);
+            });
+
+            add ("Upper Harmonic Lift", "Synths", [] (V& v)
+            {
+                //  Air made of harmonics, not shelving.
+                bandBypass (v, 0);
+                bandBypass (v, 1);
+                band (v, 2, ColorType::warm, 26.0f, 0.0f, 15.0f, 15.0f);
+                band (v, 3, ColorType::warm, 42.0f, 0.0f, 38.0f, 45.0f);
+            });
+
+            // --- VOCALS -------------------------------------------------------
+            add ("Vocal Edge", "Vocals", [] (V& v)
+            {
+                //  Presence and consonant grip for a buried vocal.
+                band (v, 0, ColorType::warm, 10.0f);
+                band (v, 1, ColorType::warm, 22.0f, -10.0f);
+                band (v, 2, ColorType::bite, 46.0f, 38.0f, 12.0f);
+                band (v, 3, ColorType::warm, 26.0f, 15.0f, 18.0f);
+            });
+
+            add ("Dark Vocal Grit", "Vocals", [] (V& v)
+            {
+                //  Low-mid density, softened top: close and rough.
+                band (v, 0, ColorType::warm, 15.0f);
+                band (v, 1, ColorType::iron, 56.0f, -22.0f, -12.0f);
+                band (v, 2, ColorType::iron, 44.0f, -15.0f, -28.0f);
+                band (v, 3, ColorType::warm, 15.0f, 0.0f, -20.0f);
+            });
+
+            add ("Harmonic Air", "Vocals", [] (V& v)
+            {
+                //  A halo of created air above the voice.
+                bandBypass (v, 0);
+                bandBypass (v, 1);
+                band (v, 2, ColorType::warm, 20.0f, 0.0f, 10.0f, 20.0f);
+                band (v, 3, ColorType::bite, 34.0f, 0.0f, 48.0f, 55.0f);
+            });
+
+            add ("Telephone Fuzz", "Vocals", [] (V& v)
+            {
+                //  Band-limited fuzz FX voice.
+                v.emplace_back (p::xover1, 340.0f);
+                v.emplace_back (p::xover3, 3400.0f);
+                bandMute (v, 0);
+                bandMute (v, 3);
+                band (v, 1, ColorType::fuzz, 58.0f, 10.0f, 10.0f);
+                band (v, 2, ColorType::fuzz, 70.0f, 20.0f, 15.0f);
+            });
+
+            // --- UTILITY / MIX ------------------------------------------------
+            add ("Gentle Four-Band Glue", "Mix", [] (V& v)
+            {
+                //  Barely-there colour for a mix bus.
+                v.emplace_back (p::mix, 72.0f);
+                band (v, 0, ColorType::warm, 18.0f, -18.0f);
+                band (v, 1, ColorType::warm, 22.0f, -12.0f);
+                band (v, 2, ColorType::warm, 20.0f, -10.0f, 4.0f);
+                band (v, 3, ColorType::warm, 16.0f, 0.0f, 6.0f);
+            });
+
+            add ("Low-End Safe Saturation", "Mix", [] (V& v)
+            {
+                //  Colour everywhere except the untouchable low end.
+                bandBypass (v, 0);
+                band (v, 1, ColorType::warm, 36.0f, -10.0f);
+                band (v, 2, ColorType::iron, 34.0f, 0.0f, 5.0f);
+                band (v, 3, ColorType::bite, 24.0f, 10.0f, 12.0f);
+            });
+
+            add ("Brightness Without EQ", "Mix", [] (V& v)
+            {
+                //  Perceived brightness from created harmonics.
+                band (v, 0, ColorType::warm, 8.0f);
+                band (v, 1, ColorType::warm, 14.0f);
+                band (v, 2, ColorType::bite, 26.0f, 12.0f, 22.0f, 10.0f);
+                band (v, 3, ColorType::bite, 38.0f, 15.0f, 42.0f, 15.0f);
+            });
+
+            add ("Parallel Color", "Mix", [] (V& v)
+            {
+                //  A driven copy folded quietly under the dry signal.
+                v.emplace_back (p::mix, 40.0f);
+                band (v, 0, ColorType::iron, 45.0f, -20.0f);
+                band (v, 1, ColorType::iron, 55.0f);
+                band (v, 2, ColorType::iron, 52.0f, 15.0f, 8.0f);
+                band (v, 3, ColorType::warm, 35.0f, 0.0f, 12.0f);
+            });
+
+            return out;
         }();
 
         return list;

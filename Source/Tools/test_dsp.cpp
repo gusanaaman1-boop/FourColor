@@ -2033,6 +2033,135 @@ static void testMixNoCombFiltering()
 }
 
 // ================================================================================
+// Phase 9 — presets and performance
+// ================================================================================
+static void testPresets()
+{
+    section ("Phase 9: factory presets");
+
+    FourColorProcessor proc;
+    const int numPresets = proc.getNumPrograms();
+    check (numPresets >= 25, "at least 24 musical presets + Default (found "
+                                 + String (numPresets) + ")");
+
+    proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+    proc.prepareToPlay (48000.0, 512);
+
+    //  Every preset must load, produce finite audio, and differ from every
+    //  other preset in at least one parameter.
+    std::vector<std::vector<float>> signatures;
+    MidiBuffer midi;
+
+    for (int i = 0; i < numPresets; ++i)
+    {
+        proc.setCurrentProgram (i);
+
+        std::vector<float> sig;
+        for (auto* param : proc.getParameters())
+            if (auto* ranged = dynamic_cast<RangedAudioParameter*> (param))
+                sig.push_back (ranged->getValue());
+        signatures.push_back (std::move (sig));
+
+        AudioBuffer<float> buf (2, 512);
+        bool finite = true;
+        int sampleIndex = 0;
+        float peak = 0.0f;
+
+        for (int blk = 0; blk < 30; ++blk)
+        {
+            for (int s = 0; s < 512; ++s, ++sampleIndex)
+                for (int c = 0; c < 2; ++c)
+                    buf.setSample (c, s, 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * sampleIndex / 48000.0)
+                                        + 0.1f * (float) std::sin (2.0 * MathConstants<double>::pi * 3000.0 * sampleIndex / 48000.0));
+
+            proc.processBlock (buf, midi);
+
+            for (int c = 0; c < 2; ++c)
+                for (int s = 0; s < 512; ++s)
+                {
+                    if (! std::isfinite (buf.getSample (c, s))) finite = false;
+                    peak = jmax (peak, std::abs (buf.getSample (c, s)));
+                }
+        }
+
+        check (finite && peak < 4.0f,
+               "preset '" + proc.getProgramName (i) + "' produces sane audio (peak "
+                   + String (peak, 3) + ")");
+    }
+
+    int duplicates = 0;
+    for (size_t a = 0; a < signatures.size(); ++a)
+        for (size_t b = a + 1; b < signatures.size(); ++b)
+        {
+            double diff = 0.0;
+            for (size_t k = 0; k < signatures[a].size(); ++k)
+                diff += std::abs (signatures[a][k] - signatures[b][k]);
+            if (diff < 1.0e-4)
+                ++duplicates;
+        }
+    check (duplicates == 0, "no two presets are identical (duplicates: "
+                                + String (duplicates) + ")");
+}
+
+static void testCpuBudget()
+{
+    section ("Phase 9: CPU (Release, stereo, 512-sample blocks)");
+
+    for (auto quality : { Quality::high, Quality::ultra })
+    {
+        FourColorEngine engine;
+        engine.prepare (48000.0, 512, 2);
+
+        EngineParameters p;
+        p.quality = quality;
+        p.bands[0].color = ColorType::warm;
+        p.bands[1].color = ColorType::iron;
+        p.bands[2].color = ColorType::bite;
+        p.bands[3].color = ColorType::fuzz;
+        for (auto& b : p.bands)
+        {
+            b.drive = 60.0f;
+            b.behavior = 40.0f;
+            b.space = 30.0f;
+        }
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (2, 512);
+        int sampleIndex = 0;
+
+        //  Warm up, then time 10 seconds of audio.
+        auto fill = [&]
+        {
+            for (int i = 0; i < 512; ++i, ++sampleIndex)
+                for (int c = 0; c < 2; ++c)
+                    io.setSample (c, i, 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * sampleIndex / 48000.0));
+        };
+
+        for (int blk = 0; blk < 20; ++blk) { fill(); engine.process (io); }
+
+        const int blocks = 48000 * 10 / 512;
+        const auto start = Time::getHighResolutionTicks();
+        for (int blk = 0; blk < blocks; ++blk)
+        {
+            fill();
+            engine.setParameters (p);
+            engine.process (io);
+        }
+        const double seconds = Time::highResolutionTicksToSeconds (
+            Time::getHighResolutionTicks() - start);
+
+        const double audioSeconds = blocks * 512.0 / 48000.0;
+        const double realtimeFactor = audioSeconds / seconds;
+
+        std::printf ("      %dx: %.2f s CPU for %.1f s audio = %.1fx realtime\n",
+                     oversamplingFactorFor (quality), seconds, audioSeconds, realtimeFactor);
+
+        check (realtimeFactor > 8.0, String (oversamplingFactorFor (quality))
+                   + "x runs faster than 8x realtime (" + String (realtimeFactor, 1) + "x)");
+    }
+}
+
+// ================================================================================
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -2071,6 +2200,9 @@ int main()
     testGlobalTone();
     testAutoLevel();
     testMixNoCombFiltering();
+
+    testPresets();
+    testCpuBudget();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;
