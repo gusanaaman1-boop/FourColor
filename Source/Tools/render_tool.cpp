@@ -181,12 +181,346 @@ namespace
     }
 }
 
+
+namespace
+{
+    // --- audition pack -----------------------------------------------------------
+    //  Six deterministic sources, closed-form so two runs are byte-identical and
+    //  so the pack carries no sample licences with it. They are not a substitute
+    //  for running your own material through the plug-in in a DAW - they are a
+    //  fair, repeatable A/B that isolates one variable at a time.
+    enum class Source { bass, melody, drums, pad, vocal, fullLoop };
+
+    const char* sourceName (Source s)
+    {
+        switch (s)
+        {
+            case Source::bass:     return "bass";
+            case Source::melody:   return "melody";
+            case Source::drums:    return "drums";
+            case Source::pad:      return "pad";
+            case Source::vocal:    return "vocal";
+            case Source::fullLoop: return "full-loop";
+        }
+        return "?";
+    }
+
+    double auditionSample (Source src, int64 n, double sr, int channel)
+    {
+        const double t = (double) n / sr;
+        const double bar = std::fmod (t, 2.0);          // 2 s loop, 120 bpm
+        const double beat = std::fmod (t, 0.5);
+        const double eighth = std::fmod (t, 0.25);
+
+        auto note = [] (double phase, double freq, double decay, double amp)
+        {
+            return amp * std::exp (-phase * decay)
+                       * std::sin (MathConstants<double>::twoPi * freq * phase);
+        };
+
+        switch (src)
+        {
+            case Source::bass:
+            {
+                //  A rolling bass line: root, fifth, octave, minor seventh.
+                const int step = (int) (bar / 0.5);
+                const double roots[] = { 55.0, 82.5, 110.0, 98.0 };
+                const double f = roots[step & 3];
+                //  Two partials plus a touch of third: a synth bass, not a sine.
+                return 0.45 * std::exp (-beat * 1.6)
+                     * (std::sin (MathConstants<double>::twoPi * f * t)
+                        + 0.30 * std::sin (MathConstants<double>::twoPi * f * 2.0 * t)
+                        + 0.12 * std::sin (MathConstants<double>::twoPi * f * 3.0 * t));
+            }
+
+            case Source::melody:
+            {
+                //  Plucked eighth notes over a pentatonic figure.
+                const int step = (int) (bar / 0.25);
+                const double scale[] = { 440.0, 523.25, 587.33, 659.25,
+                                         587.33, 523.25, 440.0, 392.0 };
+                const double f = scale[step & 7];
+                return note (eighth, f, 7.0, 0.34)
+                     + note (eighth, f * 2.0, 11.0, 0.12)
+                     + note (eighth, f * 3.0, 16.0, 0.05);
+            }
+
+            case Source::drums:
+            {
+                //  Kick on every beat, snare on 2 and 4, hats on eighths.
+                const int beatIndex = (int) (bar / 0.5);
+                const double kickF = 105.0 * std::exp (-beat * 20.0) + 46.0;
+                double v = 0.62 * std::exp (-beat * 12.0)
+                                * std::sin (MathConstants<double>::twoPi * kickF * beat);
+
+                if ((beatIndex & 1) == 1)
+                {
+                    //  Snare: a tuned body plus shaped noise from a fixed LCG,
+                    //  so it is noisy but still deterministic.
+                    uint32 rng = (uint32) (n * 1664525u + 1013904223u);
+                    rng ^= rng >> 13; rng *= 1274126177u; rng ^= rng >> 16;
+                    const double noise = ((double) (rng & 0xffff) / 32768.0) - 1.0;
+                    v += std::exp (-beat * 26.0)
+                         * (0.20 * std::sin (MathConstants<double>::twoPi * 190.0 * beat)
+                            + 0.26 * noise);
+                }
+
+                {
+                    uint32 rng = (uint32) (n * 22695477u + 1u);
+                    rng ^= rng >> 15; rng *= 2246822519u; rng ^= rng >> 13;
+                    const double noise = ((double) (rng & 0xffff) / 32768.0) - 1.0;
+                    v += 0.13 * std::exp (-eighth * 90.0) * noise;
+                }
+
+                return v;
+            }
+
+            case Source::pad:
+            {
+                //  Four detuned saw-ish voices, slow swell, slightly different
+                //  per channel so the stereo behaviour is exercised.
+                const double detune = channel == 0 ? 1.0 : 1.004;
+                double v = 0.0;
+                const double roots[] = { 110.0, 164.81, 220.0, 277.18 };
+                for (double f : roots)
+                    for (int h = 1; h <= 6; ++h)
+                        v += (0.10 / h) * std::sin (MathConstants<double>::twoPi
+                                                        * f * detune * h * t
+                                                    + (double) h * 0.7);
+                return v * (0.55 + 0.45 * std::sin (MathConstants<double>::twoPi * 0.25 * t));
+            }
+
+            case Source::vocal:
+            {
+                //  A sung vowel: fundamental with vibrato, three formants.
+                const double vib = 1.0 + 0.012 * std::sin (MathConstants<double>::twoPi * 5.2 * t);
+                const double f0 = 196.0 * vib;
+                const double env = 0.5 + 0.5 * std::sin (MathConstants<double>::twoPi * 0.5 * t
+                                                         - MathConstants<double>::halfPi);
+                double v = 0.0;
+                for (int h = 1; h <= 20; ++h)
+                {
+                    const double f = f0 * h;
+                    //  Crude formant emphasis around 700, 1200 and 2600 Hz.
+                    double gain = 0.16 / h;
+                    for (double formant : { 700.0, 1200.0, 2600.0 })
+                        gain += 0.30 / (1.0 + std::pow ((f - formant) / 110.0, 2.0)) / h;
+                    v += gain * std::sin (MathConstants<double>::twoPi * f * t + (double) h);
+                }
+                return v * env * 0.8;
+            }
+
+            case Source::fullLoop:
+                return 0.55 * auditionSample (Source::drums, n, sr, channel)
+                     + 0.55 * auditionSample (Source::bass, n, sr, channel)
+                     + 0.35 * auditionSample (Source::melody, n, sr, channel)
+                     + 0.30 * auditionSample (Source::pad, n, sr, channel);
+        }
+        return 0.0;
+    }
+
+    struct AuditionSetup
+    {
+        ColorType color = ColorType::warm;
+        float drive = 50.0f;
+        float behavior = 0.0f;
+        float space = 0.0f;
+        bool bypassEngine = false;      // the dry reference
+    };
+
+    //  Renders one source through one setup and returns interleaved stereo.
+    AudioBuffer<float> renderAudition (Source src, const AuditionSetup& setup,
+                                       double sr, double seconds)
+    {
+        constexpr int block = 512;
+        const auto total = (int64) (seconds * sr);
+
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        auto set = [&proc] (const String& id, float value)
+        {
+            if (auto* p = proc.apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+
+        set (param::autoLevel, 0.0f);
+        for (int b = 0; b < numBands; ++b)
+        {
+            set (param::band (b, param::color), (float) (int) setup.color);
+            set (param::band (b, param::drive), setup.bypassEngine ? 0.0f : setup.drive);
+            set (param::band (b, param::behavior), setup.behavior);
+            set (param::band (b, param::space), setup.bypassEngine ? 0.0f : setup.space);
+        }
+
+        AudioBuffer<float> out (2, (int) total);
+        out.clear();
+
+        AudioBuffer<float> io (2, block);
+        MidiBuffer midi;
+        int64 written = 0;
+
+        //  A short pre-roll so smoothers and the Space estimator are settled
+        //  before the first sample anyone hears.
+        const int64 preRoll = (int64) (0.5 * sr);
+
+        for (int64 n = -preRoll; written < total; n += block)
+        {
+            for (int i = 0; i < block; ++i)
+                for (int c = 0; c < 2; ++c)
+                    io.setSample (c, i, (float) auditionSample (src, n + i, sr, c));
+
+            proc.processBlock (io, midi);
+
+            if (n < 0)
+                continue;
+
+            const auto count = (int) jmin ((int64) block, total - written);
+            for (int c = 0; c < 2; ++c)
+                out.copyFrom (c, (int) written, io, c, 0, count);
+            written += count;
+        }
+
+        return out;
+    }
+
+    void normaliseToRms (AudioBuffer<float>& buffer, double targetRms)
+    {
+        double sumSq = 0.0;
+        int64 count = 0;
+        for (int c = 0; c < buffer.getNumChannels(); ++c)
+        {
+            auto* d = buffer.getReadPointer (c);
+            for (int i = 0; i < buffer.getNumSamples(); ++i) { sumSq += (double) d[i] * d[i]; ++count; }
+        }
+
+        const double rms = std::sqrt (sumSq / jmax<int64> (1, count));
+        if (rms < 1.0e-9)
+            return;
+
+        //  Loudness-matched, then held below full scale so nothing clips on the
+        //  way out - a comparison that clips is not a comparison.
+        double gain = targetRms / rms;
+        const double peak = jmax (buffer.getMagnitude (0, 0, buffer.getNumSamples()),
+                                  buffer.getMagnitude (1, 0, buffer.getNumSamples()));
+        if (peak * gain > 0.97)
+            gain = 0.97 / peak;
+
+        buffer.applyGain ((float) gain);
+    }
+
+    bool writeWav (const File& file, const AudioBuffer<float>& buffer, double sr)
+    {
+        file.getParentDirectory().createDirectory();
+        file.deleteFile();
+
+        WavAudioFormat format;
+        std::unique_ptr<OutputStream> stream (file.createOutputStream().release());
+        if (stream == nullptr)
+            return false;
+
+        auto writer = format.createWriterFor (stream,
+                                              AudioFormatWriterOptions()
+                                                  .withSampleRate (sr)
+                                                  .withNumChannels (2)
+                                                  .withBitsPerSample (24)
+                                                  .withSampleFormat (
+                                                      AudioFormatWriterOptions::SampleFormat::integral));
+        if (writer == nullptr)
+            return false;
+
+        return writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples());
+    }
+
+    int writeAuditionPack (const File& root)
+    {
+        constexpr double sr = 48000.0;
+        constexpr double seconds = 4.0;
+        constexpr double targetRms = 0.10;          // about -20 dBFS RMS
+
+        root.createDirectory();
+        const Source sources[] = { Source::bass, Source::melody, Source::drums,
+                                   Source::pad, Source::vocal, Source::fullLoop };
+        const char* colorNames[] = { "warm", "iron", "bite", "fuzz" };
+        int written = 0;
+
+        auto emit = [&] (const String& folder, const String& name,
+                         Source src, const AuditionSetup& setup)
+        {
+            auto buffer = renderAudition (src, setup, sr, seconds);
+            normaliseToRms (buffer, targetRms);
+            if (writeWav (root.getChildFile (folder).getChildFile (name + ".wav"), buffer, sr))
+                ++written;
+        };
+
+        //  00 - the dry reference, same loudness as everything else.
+        for (auto src : sources)
+        {
+            AuditionSetup dry;
+            dry.bypassEngine = true;
+            emit ("00-dry", sourceName (src), src, dry);
+        }
+
+        //  01 - the four colours, same drive, on every source. The headline A/B.
+        for (auto src : sources)
+            for (int c = 0; c < 4; ++c)
+            {
+                AuditionSetup s;
+                s.color = (ColorType) c;
+                s.drive = 50.0f;
+                emit ("01-colours", String (sourceName (src)) + "-" + colorNames[c], src, s);
+            }
+
+        //  02 - drive at 20 / 50 / 80, on the two sources that show it most.
+        for (auto src : { Source::bass, Source::drums })
+            for (int c = 0; c < 4; ++c)
+                for (float drive : { 20.0f, 50.0f, 80.0f })
+                {
+                    AuditionSetup s;
+                    s.color = (ColorType) c;
+                    s.drive = drive;
+                    emit ("02-drive", String (sourceName (src)) + "-" + colorNames[c]
+                              + "-d" + String ((int) drive), src, s);
+                }
+
+        //  03 - BODY / centre / ATTACK on drums, where the axis is the point.
+        for (int c = 0; c < 4; ++c)
+            for (auto behavior : { -100.0f, 0.0f, 100.0f })
+            {
+                AuditionSetup s;
+                s.color = (ColorType) c;
+                s.drive = 60.0f;
+                s.behavior = behavior;
+                const String tag = behavior < 0 ? "body" : (behavior > 0 ? "attack" : "centre");
+                emit ("03-behavior", String ("drums-") + colorNames[c] + "-" + tag,
+                      Source::drums, s);
+            }
+
+        //  04 - Space off against a musical amount, on sustained material.
+        for (auto src : { Source::pad, Source::melody })
+            for (int c = 0; c < 4; ++c)
+                for (float space : { 0.0f, 45.0f })
+                {
+                    AuditionSetup s;
+                    s.color = (ColorType) c;
+                    s.drive = 55.0f;
+                    s.space = space;
+                    emit ("04-space", String (sourceName (src)) + "-" + colorNames[c]
+                              + "-space" + String ((int) space), src, s);
+                }
+
+        std::printf ("  wrote %d files under %s\n", written, root.getFullPathName().toRawUTF8());
+        return written > 0 ? 0 : 1;
+    }
+}
+
 int main (int argc, char* argv[])
 {
     ScopedJuceInitialiser_GUI juceInit;
 
     bool csv = false, fingerprint = false;
-    String fixtureDir;
+    String fixtureDir, auditionDir;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -194,15 +528,20 @@ int main (int argc, char* argv[])
         if (arg == "--csv") csv = true;
         else if (arg == "--fingerprint") fingerprint = true;
         else if (arg == "--write-state-fixtures" && i + 1 < argc) fixtureDir = argv[++i];
+        else if (arg == "--audition" && i + 1 < argc) auditionDir = argv[++i];
     }
 
     if (fixtureDir.isNotEmpty())
         return writeStateFixtures (File::getCurrentWorkingDirectory().getChildFile (fixtureDir));
 
+    if (auditionDir.isNotEmpty())
+        return writeAuditionPack (File::getCurrentWorkingDirectory().getChildFile (auditionDir));
+
     if (! fingerprint)
     {
         std::printf ("usage: FourColorRender --fingerprint [--csv]\n"
-                     "       FourColorRender --write-state-fixtures <dir>\n");
+                     "       FourColorRender --write-state-fixtures <dir>\n"
+                     "       FourColorRender --audition <dir>\n");
         return 2;
     }
 

@@ -169,13 +169,28 @@ namespace fourcolor
     }
 
     // --- IRON -----------------------------------------------------------------
+    void IronEngine::updateCoreLoss() noexcept
+    {
+        //  The loop must return only the BOTTOM of whatever band it is in - that
+        //  is what makes the density read as weight rather than as mud. The old
+        //  fixed 280 Hz happened to be the LOW MID band's centre; using the
+        //  centre generalises it and leaves that band where it was.
+        const float corner = juce::jlimit (20.0f, (float) rate * 0.2f, context.centreHz);
+        for (auto& c : ch)
+            c.coreLoss.setCutoff (rate, corner);
+    }
+
     void IronEngine::prepareInternals()
     {
         for (auto& c : ch)
-        {
-            c.coreLoss.setCutoff (rate, 280.0f);   // the loop returns only lows: density
             c.dc.prepare (rate);
-        }
+
+        updateCoreLoss();
+    }
+
+    void IronEngine::contextChanged() noexcept
+    {
+        updateCoreLoss();
     }
 
     void IronEngine::resetInternals()
@@ -218,14 +233,30 @@ namespace fourcolor
     }
 
     // --- BITE -----------------------------------------------------------------
+    void BiteEngine::updateEmphasisFilters() noexcept
+    {
+        //  Pre-emphasis has to push the TOP OF THIS BAND into the clipper. The
+        //  old fixed 1800 Hz was the HIGH MID centre; in the low band it passed
+        //  almost nothing and BITE lost the mechanism that defines it.
+        const float corner = juce::jlimit (20.0f, (float) rate * 0.2f, context.centreHz);
+        for (auto& c : ch)
+        {
+            c.preHp.setCutoff (rate, corner);
+            c.postHp.setCutoff (rate, corner);
+        }
+    }
+
     void BiteEngine::prepareInternals()
     {
         for (auto& c : ch)
-        {
-            c.preHp.setCutoff (rate, 1800.0f);
-            c.postHp.setCutoff (rate, 1800.0f);
             c.dc.prepare (rate);
-        }
+
+        updateEmphasisFilters();
+    }
+
+    void BiteEngine::contextChanged() noexcept
+    {
+        updateEmphasisFilters();
     }
 
     void BiteEngine::resetInternals()
@@ -280,14 +311,32 @@ namespace fourcolor
     }
 
     // --- FUZZ -----------------------------------------------------------------
+    void FuzzEngine::updateGateTimes() noexcept
+    {
+        //  Half a period of the band centre, so the envelope reads the band's
+        //  LEVEL instead of riding its waveform. In the HIGH MID band that lands
+        //  near the 0.5 ms this used to be fixed at; in the LOW band it opens
+        //  out to about 10 ms, which is the difference between a sputter and a
+        //  buzz on a 30 Hz decay.
+        const float centre = juce::jlimit (20.0f, 20000.0f, context.centreHz);
+        const float attackMs  = juce::jlimit (0.3f, 12.0f, 500.0f / centre);
+        const float releaseMs = juce::jlimit (30.0f, 150.0f, 12000.0f / centre);
+
+        envAttack  = 1.0f - std::exp (-1.0f / (attackMs  * 0.001f * (float) rate));
+        envRelease = 1.0f - std::exp (-1.0f / (releaseMs * 0.001f * (float) rate));
+    }
+
     void FuzzEngine::prepareInternals()
     {
-        //  Fast gate envelope: ~0.5 ms attack, ~30 ms release.
-        envAttack  = 1.0f - std::exp (-1.0f / (0.0005f * (float) rate));
-        envRelease = 1.0f - std::exp (-1.0f / (0.030f * (float) rate));
-
         for (auto& c : ch)
             c.dc.prepare (rate);
+
+        updateGateTimes();
+    }
+
+    void FuzzEngine::contextChanged() noexcept
+    {
+        updateGateTimes();
     }
 
     void FuzzEngine::resetInternals()

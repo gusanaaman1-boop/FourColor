@@ -160,10 +160,17 @@ namespace fourcolor
         void prepareInternals() override;
         void resetInternals() override;
         void driveChanged() noexcept override;
+        void contextChanged() noexcept override;
         float staticShape (float u) const noexcept override;
         float maxDriveDb() const noexcept override { return 27.0f; }
 
     private:
+        //  The core-loss corner follows the band. A fixed 280 Hz was the centre
+        //  of the LOW MID band and nothing else: inside a 20-120 Hz band it
+        //  passes the whole signal, so the loop returned everything and IRON had
+        //  no density down there at all.
+        void updateCoreLoss() noexcept;
+
         float fbAmount = 0.0f, evenAmount = 0.0f;
         struct Ch { dsp::OnePole coreLoss; float lastOut = 0.0f; dsp::DcBlocker dc; } ch[maxChannels];
     };
@@ -179,10 +186,16 @@ namespace fourcolor
         void prepareInternals() override;
         void resetInternals() override;
         void driveChanged() noexcept override;
+        void contextChanged() noexcept override;
         float staticShape (float u) const noexcept override;
         float maxDriveDb() const noexcept override { return 30.0f; }
 
     private:
+        //  Same story: 1800 Hz was the HIGH MID centre. In the low band a
+        //  1800 Hz high-pass passes almost nothing, so BITE's defining
+        //  pre-emphasis did nothing there and it collapsed to a bare diode.
+        void updateEmphasisFilters() noexcept;
+
         float emphasis = 0.6f;
         struct Ch { dsp::OnePole preHp, postHp; dsp::DcBlocker dc; } ch[maxChannels];
     };
@@ -198,10 +211,17 @@ namespace fourcolor
         void prepareInternals() override;
         void resetInternals() override;
         void driveChanged() noexcept override;
+        void contextChanged() noexcept override;
         float staticShape (float u) const noexcept override;
         float maxDriveDb() const noexcept override { return 36.0f; }
 
     private:
+        //  The gate's clock follows the band. 0.5 ms is right for a snare and
+        //  wrong for a 30 Hz decay, where an envelope that fast rides the
+        //  waveform and the gate opens and shuts twice per cycle - buzz, not
+        //  sputter.
+        void updateGateTimes() noexcept;
+
         float rectify = 0.0f, gateThreshold = 0.002f;
         float envAttack = 0.0f, envRelease = 0.0f;
         struct Ch { float env = 0.0f; dsp::DcBlocker dc; } ch[maxChannels];
