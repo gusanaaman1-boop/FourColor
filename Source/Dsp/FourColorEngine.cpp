@@ -111,6 +111,11 @@ namespace fourcolor
             std::sqrt (f2 * f3),    std::sqrt (f3 * 16000.0f)
         };
 
+        //  The same edges the centres are built from, handed to the colour
+        //  engines as internal context. 20 Hz and 16 kHz are the ends of the
+        //  instrument's working range, not filter corners.
+        const float edges[numBands + 1] = { 20.0f, f1, f2, f3, 16000.0f };
+
         for (int b = 0; b < numBands; ++b)
         {
             bands[b].setQuality (p.quality);
@@ -131,6 +136,8 @@ namespace fourcolor
             s.bypass       = p.bands[b].bypass;
             s.soloGain     = anySolo ? (p.bands[b].solo ? 1.0f : 0.0f) : 1.0f;
             s.centreHz     = centres[b];
+            s.bandLowHz    = edges[b];
+            s.bandHighHz   = edges[b + 1];
             bands[b].setSettings (s);
         }
 

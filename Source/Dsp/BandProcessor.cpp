@@ -62,6 +62,15 @@ namespace fourcolor
         nonlinear.setColor (s.color);
         driveSmoothed.setTargetValue (s.drivePercent);
         tone.setTone (s.tone, s.centreHz);
+
+        //  Hand the colour engines their place in the spectrum. Block rate, and
+        //  never a reset - see ColorEngine::setContext.
+        ColorContext ctx;
+        ctx.bandIndex  = bandIndex;
+        ctx.bandLowHz  = s.bandLowHz;
+        ctx.bandHighHz = s.bandHighHz;
+        ctx.centreHz   = s.centreHz;
+        nonlinear.setContext (ctx);
         behavior.setBehavior (s.behavior);
         space.setAmount (s.spacePercent * 0.01f);
 

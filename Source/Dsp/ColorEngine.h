@@ -24,6 +24,27 @@
 
 namespace fourcolor
 {
+    //  Where a colour engine is sitting in the spectrum.
+    //
+    //  This is internal state, not a parameter: nothing here is automatable,
+    //  nothing is stored in a preset, and no Parameter ID exists for any of it.
+    //  It is the answer to a question the engines could not previously ask -
+    //  "what frequencies am I actually being asked to distort?" - which is why
+    //  a diode pair tuned around 1800 Hz did almost nothing inside a 20-120 Hz
+    //  band, and why a gate tuned for a snare chattered on a 30 Hz decay.
+    //
+    //  It changes whenever a crossover moves, which means anything derived from
+    //  it must be smoothed or rate-limited: a coefficient that jumps with the
+    //  block is a click on a crossover automation ramp.
+    struct ColorContext
+    {
+        int bandIndex = 0;
+        double oversampledRate = 48000.0;
+        float bandLowHz = 20.0f;
+        float bandHighHz = 16000.0f;
+        float centreHz = 500.0f;
+    };
+
     class ColorEngine
     {
     public:
@@ -34,6 +55,14 @@ namespace fourcolor
 
         //  drivePercent 0..100. Cheap; called once per block.
         void setDrive (float drivePercent) noexcept;
+
+        //  Where this engine sits in the spectrum. Called at block rate, and
+        //  NEVER resets internal state: a crossover move must not silence a
+        //  feedback loop or empty a sag envelope. Engines that derive
+        //  coefficients from it do so through contextChanged().
+        void setContext (const ColorContext& c) noexcept;
+
+        const ColorContext& getContext() const noexcept { return context; }
 
         //  Per-band Behavior modulation multiplies the effective pre-gain.
         //  1.0 = neutral; bounded to about +/-6 dB by the caller.
@@ -70,12 +99,19 @@ namespace fourcolor
         virtual void resetInternals() = 0;
         virtual void driveChanged() noexcept {}
 
+        //  Recompute anything derived from the band's frequency range. Called
+        //  only when the context has actually moved by an audible amount, so an
+        //  engine may do real work here - but it must not reset state.
+        virtual void contextChanged() noexcept {}
+
         //  The engine's memoryless transfer approximation, used only to compute
         //  static gain compensation.
         virtual float staticShape (float u) const noexcept = 0;
 
         //  Maximum pre-gain in dB at drive = 100.
         virtual float maxDriveDb() const noexcept = 0;
+
+        ColorContext context;
 
         double rate = 48000.0;
         int channelCount = 2;

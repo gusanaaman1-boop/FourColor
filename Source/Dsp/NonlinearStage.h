@@ -43,6 +43,11 @@ namespace fourcolor
 
         void setDrive (float drivePercent) noexcept;
 
+        //  Where this band sits in the spectrum. The stage owns the only thing
+        //  the caller cannot know - which oversampling factor each engine bank
+        //  is currently running at - so it fills that field in itself.
+        void setContext (const ColorContext& c) noexcept;
+
         //  In-place. `behaviorMod`, if given, is a base-rate per-sample linear
         //  gain factor (around 1.0) applied to the engine pre-gain.
         void process (juce::AudioBuffer<float>& buffer,
@@ -70,6 +75,12 @@ namespace fourcolor
         }
 
         ColorType getColor() const noexcept { return activeColor; }
+
+        //  The engine currently producing audio. Diagnostics and tests only.
+        const ColorEngine& getActiveEngine() const noexcept
+        {
+            return *engines[activeBank][(size_t) activeColor];
+        }
         bool isSwitchingQuality() const noexcept { return qualityFadeLeft > 0; }
 
     private:
@@ -120,6 +131,7 @@ namespace fourcolor
         juce::AudioBuffer<float> modScratch;       // oversampled behavior modulation
         juce::AudioBuffer<float> qualityScratch;   // base-rate copy, outgoing quality
         float drivePercent = 25.0f;
+        ColorContext bandContext;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NonlinearStage)
     };

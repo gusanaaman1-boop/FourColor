@@ -23,6 +23,33 @@ namespace fourcolor
         resetInternals();
     }
 
+    void ColorEngine::setContext (const ColorContext& c) noexcept
+    {
+        //  Only act on a real move. setSettings runs every block, and the
+        //  crossover smoother delivers a slightly different number every one of
+        //  them; recomputing filter coefficients at block rate off a
+        //  continuously drifting value is how a crossover ramp turns into a
+        //  zipper. A twentieth of a semitone is below anything audible in a
+        //  band edge and far above the smoother's per-block step.
+        const auto moved = [] (float a, float b)
+        {
+            return ! (a > 0.0f && b > 0.0f) || std::abs (std::log (a / b)) > 0.003f;
+        };
+
+        const bool changed = context.bandIndex != c.bandIndex
+                          || std::abs (context.oversampledRate - c.oversampledRate) > 1.0e-6
+                          || moved (context.bandLowHz,  c.bandLowHz)
+                          || moved (context.bandHighHz, c.bandHighHz)
+                          || moved (context.centreHz,   c.centreHz);
+
+        context = c;
+
+        //  Never a reset. A band edge moving is not a reason to empty a
+        //  feedback loop, a sag envelope or a DC blocker.
+        if (changed)
+            contextChanged();
+    }
+
     void ColorEngine::setDrive (float drivePercent) noexcept
     {
         d01 = juce::jlimit (0.0f, 1.0f, drivePercent * 0.01f);

@@ -39,6 +39,13 @@ namespace fourcolor
             bool  bypass = false;
             float soloGain = 1.0f;        // resolved by the owner
             float centreHz = 500.0f;      // band geometric centre, for Tone
+
+            //  The band's actual frequency range, from the live crossover.
+            //  Not parameters: internal context for the colour engines, which
+            //  otherwise have no way to know whether they are shaping a 30 Hz
+            //  sub or a 12 kHz air band.
+            float bandLowHz  = 20.0f;
+            float bandHighHz = 16000.0f;
         };
 
         void setSettings (const Settings& s) noexcept;

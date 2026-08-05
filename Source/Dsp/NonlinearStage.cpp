@@ -78,10 +78,14 @@ namespace fourcolor
         const double engineRate = baseRate
                                 * (double) oversamplers[qualityIndex]->getOversamplingFactor();
 
+        auto ctx = bandContext;
+        ctx.oversampledRate = engineRate;
+
         for (auto& e : engines[bankIndex])
         {
             e->prepare (engineRate, channels);
             e->setDrive (drivePercent);
+            e->setContext (ctx);
         }
 
         //  In the oversampled domain the pad is exact: the oversampler's own
@@ -155,6 +159,28 @@ namespace fourcolor
 
         for (auto& bank : engines)
             bank[(size_t) activeColor]->setDrive (drivePercent);
+    }
+
+    void NonlinearStage::setContext (const ColorContext& c) noexcept
+    {
+        bandContext = c;
+
+        //  Both banks: during a quality crossfade the outgoing one is still
+        //  producing audio, and a band edge that reached only one of them would
+        //  make the two paths disagree in the middle of the fade.
+        for (int bank = 0; bank < 2; ++bank)
+        {
+            const int q = bank == activeBank ? activeQuality : outgoingQuality;
+
+            if (oversamplers[q] == nullptr)
+                continue;
+
+            auto ctx = c;
+            ctx.oversampledRate = baseRate * (double) oversamplers[q]->getOversamplingFactor();
+
+            for (auto& e : engines[bank])
+                e->setContext (ctx);
+        }
     }
 
     void NonlinearStage::setDrive (float newDrivePercent) noexcept

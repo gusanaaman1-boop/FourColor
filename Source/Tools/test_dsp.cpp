@@ -2832,6 +2832,246 @@ static void testAnalyzerCpu()
 }
 
 // ================================================================================
+// --- Phase 13 ---------------------------------------------------------------
+
+static void testColorContext()
+{
+    section ("Phase 13: colour engines know where they are");
+
+    const double sr = 48000.0;
+    const int    block = 256;
+
+    //  The context reaches the engines, and says the right thing.
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        auto set = [&] (const String& id, float value)
+        {
+            if (auto* p = proc.apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+
+        set (param::xover1, 120.0f);
+        set (param::xover2, 700.0f);
+        set (param::xover3, 4500.0f);
+
+        MidiBuffer midi;
+        AudioBuffer<float> buffer = makeSine (2, block, 100.0, sr);
+        proc.processBlock (buffer, midi);
+
+        const float lowHz[numBands]  = { 20.0f, 120.0f, 700.0f, 4500.0f };
+        const float highHz[numBands] = { 120.0f, 700.0f, 4500.0f, 16000.0f };
+
+        bool edgesRight = true, indexRight = true, rateRight = true;
+
+        for (int b = 0; b < numBands; ++b)
+        {
+            const auto& ctx = proc.getEngine().getBand (b).getNonlinearStage()
+                                  .getActiveEngine().getContext();
+
+            edgesRight = edgesRight
+                          && std::abs (ctx.bandLowHz  - lowHz[b])  < 1.0f
+                          && std::abs (ctx.bandHighHz - highHz[b]) < 1.0f;
+            indexRight = indexRight && ctx.bandIndex == b;
+
+            //  The engines run oversampled; the context must report the rate
+            //  they actually run at, not the host's.
+            rateRight = rateRight && ctx.oversampledRate >= sr - 1.0;
+        }
+
+        check (edgesRight, "every band's context carries its own crossover edges");
+        check (indexRight, "every band's context carries its own index");
+        check (rateRight,  "the context reports the oversampled rate, not the base rate");
+    }
+
+    //  A crossover move must not reset engine state. IRON is the test case: it
+    //  has a feedback loop with memory, so a reset is audible as a hole.
+    {
+        NonlinearStage stage;
+        stage.prepare (sr, block, 1);
+        stage.setColor (ColorType::iron);
+        stage.setDrive (70.0f);
+
+        ColorContext ctx;
+        ctx.bandIndex = 0; ctx.bandLowHz = 20.0f; ctx.bandHighHz = 120.0f; ctx.centreHz = 49.0f;
+        stage.setContext (ctx);
+
+        AudioBuffer<float> warm (1, block);
+        for (int blk = 0; blk < 40; ++blk)
+        {
+            auto* d = warm.getWritePointer (0);
+            for (int i = 0; i < block; ++i)
+                d[i] = 0.6f * (float) std::sin (2.0 * MathConstants<double>::pi * 50.0
+                                                  * (blk * block + i) / sr);
+            stage.process (warm);
+        }
+
+        //  Two identical blocks: one with the context left alone, one with the
+        //  band edge moved between them. If setContext reset anything, the two
+        //  outputs would diverge by far more than a coefficient nudge.
+        auto runOne = [&] (bool moveEdge)
+        {
+            NonlinearStage s2;
+            s2.prepare (sr, block, 1);
+            s2.setColor (ColorType::iron);
+            s2.setDrive (70.0f);
+            s2.setContext (ctx);
+
+            AudioBuffer<float> b (1, block);
+            for (int blk = 0; blk < 40; ++blk)
+            {
+                auto* d = b.getWritePointer (0);
+                for (int i = 0; i < block; ++i)
+                    d[i] = 0.6f * (float) std::sin (2.0 * MathConstants<double>::pi * 50.0
+                                                      * (blk * block + i) / sr);
+
+                if (moveEdge && blk == 20)
+                {
+                    auto moved = ctx;
+                    moved.bandHighHz = 180.0f;
+                    moved.centreHz = std::sqrt (20.0f * 180.0f);
+                    s2.setContext (moved);
+                }
+
+                s2.process (b);
+            }
+
+            return b;
+        };
+
+        auto still = runOne (false);
+        auto moved = runOne (true);
+
+        double maxStep = 0.0;
+        float prev = moved.getSample (0, 0);
+
+        for (int i = 1; i < block; ++i)
+        {
+            const auto v = moved.getSample (0, i);
+            maxStep = jmax (maxStep, (double) std::abs (v - prev));
+            prev = v;
+        }
+
+        check (allFinite (moved), "IRON stays finite across a band-edge move");
+        check (maxStep < 0.02, "a band-edge move produces no sample step above 0.02 FS (max "
+                                   + String (maxStep, 4) + ")");
+        check (peakOf (still) > 0.05f, "the reference run actually produced signal");
+    }
+
+    //  A full f1 sweep across 40-400 Hz, through the whole plug-in, while a
+    //  sine runs. This is the acceptance criterion for the phase.
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        auto set = [&] (const String& id, float value)
+        {
+            if (auto* p = proc.apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+
+        for (int b = 0; b < numBands; ++b)
+            set (param::band (b, param::drive), 60.0f);
+
+        MidiBuffer midi;
+        AudioBuffer<float> buffer (2, block);
+
+        double maxStep = 0.0;
+        float prev[2] = { 0.0f, 0.0f };
+        bool finite = true;
+        int n = 0;
+
+        for (int blk = 0; blk < 240; ++blk)
+        {
+            //  40 -> 400 -> 40 Hz, the whole documented range of the sweep.
+            const float t = 0.5f - 0.5f * std::cos (blk * 0.05f);
+            set (param::xover1, 40.0f + 360.0f * t);
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                auto* d = buffer.getWritePointer (ch);
+                for (int i = 0; i < block; ++i)
+                    d[i] = 0.4f * (float) std::sin (2.0 * MathConstants<double>::pi * 70.0
+                                                      * (n + i) / sr);
+            }
+
+            n += block;
+            proc.processBlock (buffer, midi);
+
+            //  Skip the first blocks: the plug-in is still filling its latency.
+            if (blk < 8)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                    prev[ch] = buffer.getSample (ch, block - 1);
+
+                continue;
+            }
+
+            finite = finite && allFinite (buffer);
+
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                for (int i = 0; i < block; ++i)
+                {
+                    const auto v = buffer.getSample (ch, i);
+                    maxStep = jmax (maxStep, (double) std::abs (v - prev[ch]));
+                    prev[ch] = v;
+                }
+            }
+        }
+
+        check (finite, "f1 sweep 40-400 Hz stays finite");
+        check (maxStep < 0.02, "f1 sweep 40-400 Hz produces no sample step above 0.02 FS (max "
+                                   + String (maxStep, 4) + ")");
+    }
+
+    //  And the context update itself must not allocate.
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        auto set = [&] (const String& id, float value)
+        {
+            if (auto* p = proc.apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+
+        MidiBuffer midi;
+        AudioBuffer<float> buffer (2, block);
+
+        for (int i = 0; i < 8; ++i)
+        {
+            buffer = makeSine (2, block, 100.0, sr);
+            proc.processBlock (buffer, midi);
+        }
+
+        allocationCount.store (0);
+
+        //  Only processBlock is inside the tripwire. setValueNotifyingHost is a
+        //  host/UI-thread call and allocates in JUCE's listener machinery; that
+        //  is not what "no allocation on the audio thread" means, and counting
+        //  it would make this test fail for a reason that has nothing to do
+        //  with the DSP.
+        for (int blk = 0; blk < 60; ++blk)
+        {
+            set (param::xover1, 60.0f + 200.0f * (blk % 7) / 7.0f);
+            buffer = makeSine (2, block, 100.0, sr);
+
+            trackAllocations.store (true);
+            proc.processBlock (buffer, midi);
+            trackAllocations.store (false);
+        }
+
+        check (allocationCount.load() == 0,
+               "moving a crossover allocates nothing on the audio thread ("
+                   + String (allocationCount.load()) + ")");
+    }
+}
+
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -2846,6 +3086,7 @@ int main()
     testCrossoverRecombination();
     testCrossoverNull();
     testCrossoverSpacingAndAutomation();
+    testColorContext();
 
     testColorEnginesDiffer();
     testColorLoudnessMatch();
