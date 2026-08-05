@@ -19,6 +19,7 @@
 #include "../Core/StateMigration.h"
 #include "../Dsp/ColorEngine.h"
 #include "../Dsp/Crossover.h"
+#include "../Dsp/BehaviorDetector.h"
 #include "../Dsp/HarmonicSpace.h"
 #include "../Dsp/NonlinearStage.h"
 #include "../PluginEditor.h"
@@ -2060,11 +2061,254 @@ namespace
 }
 
 // ================================================================================
-//  Phase 14: the Space estimator stays converged, and switch-on leaks nothing
+//  Phase 15: the Behavior detector never stops watching
 // ================================================================================
 namespace
 {
     const char* const engineNames[] = { "WARM", "IRON", "BITE", "FUZZ" };
+
+    //  Drives one detector directly and returns the modulation curve it wrote.
+    //  `amountAt` is asked for the amount at the start of each block, so a
+    //  control move mid-render is expressed the way the host would do it.
+    std::vector<float> runDetector (int bandIndex, double sr, int block, int blocks,
+                                    std::function<float (int blockIndex)> amountAt,
+                                    std::function<float (int sampleIndex)> source)
+    {
+        BehaviorDetector detector;
+        detector.prepare (sr, bandIndex);
+
+        AudioBuffer<float> in (2, block);
+        std::vector<float> mod;
+        mod.reserve ((size_t) (block * blocks));
+
+        std::vector<float> scratch ((size_t) block, 0.0f);
+        int s = 0;
+
+        for (int blk = 0; blk < blocks; ++blk)
+        {
+            detector.setBehavior (amountAt (blk));
+
+            for (int i = 0; i < block; ++i, ++s)
+            {
+                const float v = source (s);
+                in.setSample (0, i, v);
+                in.setSample (1, i, v);
+            }
+
+            detector.writeModulation (in, scratch.data(), block);
+            for (int i = 0; i < block; ++i)
+                mod.push_back (scratch[(size_t) i]);
+        }
+
+        return mod;
+    }
+}
+
+static void testBehaviorDetectorStaysWarm()
+{
+    section ("Phase 15: engaging Behavior does not start the detector from cold");
+
+    const double sr = 48000.0;
+    const int block = 128;
+    const int blocks = 400;                     // ~1.07 s
+    const int engageBlock = 200;
+
+    //  A percussion train: the detector's whole job is visible on it.
+    auto hits = [sr] (int s) {
+        const double phase = std::fmod ((double) s / sr, 0.15);
+        return 0.5f * (float) (std::exp (-phase * 30.0)
+                               * std::sin (2.0 * MathConstants<double>::pi * 700.0 * phase));
+    };
+
+    double worstDiffDb = -200.0;
+
+    for (int band = 0; band < numBands; ++band)
+    {
+        //  A: engaged from the first sample. B: at zero, then engaged halfway.
+        const auto always = runDetector (band, sr, block, blocks,
+                                         [] (int) { return 1.0f; }, hits);
+        const auto engaged = runDetector (band, sr, block, blocks,
+                                          [] (int blk)
+                                          { return blk < 200 ? 0.0f : 1.0f; }, hits);
+
+        //  Compare well after the engage, once B's modulation smoother has
+        //  settled. If the envelopes had been frozen while the amount was 0,
+        //  they would still be converging here.
+        const auto from = (size_t) ((engageBlock + 20) * block);
+        double worst = 0.0;
+        for (size_t i = from; i < always.size(); ++i)
+            worst = jmax (worst, std::abs ((double) always[i] - engaged[i]));
+
+        const double db = Decibels::gainToDecibels (worst, -200.0);
+        worstDiffDb = jmax (worstDiffDb, db);
+        std::printf ("      band %d: engaged-late vs always-on modulation differs by %.1f dBFS\n",
+                     band + 1, db);
+    }
+
+    check (worstDiffDb < -60.0,
+           "a detector engaged late matches one that ran continuously (worst "
+               + String (worstDiffDb, 1) + " dBFS)");
+}
+
+static void testBehaviorNoRippleOnSustained()
+{
+    section ("Phase 15: sustained tones do not make the modulation ripple");
+
+    const double sr = 48000.0;
+    const int block = 128;
+    const int blocks = 600;
+
+    //  The case the per-band clocks exist for: a 40 Hz fundamental has a 25 ms
+    //  period, and a follower fast enough for a hi-hat would ride its waveform,
+    //  which would be heard as buzz rather than as saturation.
+    struct Probe { int band; double freq; const char* what; };
+    const Probe probes[] = { { 0, 40.0,  "LOW at 40 Hz" },
+                             { 0, 90.0,  "LOW at 90 Hz" },
+                             { 1, 300.0, "LOW MID at 300 Hz" },
+                             { 3, 8000.0, "HIGH at 8 kHz" } };
+
+    double worstRippleDb = 0.0;
+
+    for (const auto& probe : probes)
+    {
+        auto tone = [sr, &probe] (int s) {
+            return 0.4f * (float) std::sin (2.0 * MathConstants<double>::pi * probe.freq * s / sr);
+        };
+
+        const auto mod = runDetector (probe.band, sr, block, blocks,
+                                      [] (int) { return 1.0f; }, tone);
+
+        //  Steady state only: the last half of the render.
+        const size_t from = mod.size() / 2;
+        double lo = 1.0e9, hi = -1.0e9;
+        for (size_t i = from; i < mod.size(); ++i)
+        {
+            lo = jmin (lo, (double) mod[i]);
+            hi = jmax (hi, (double) mod[i]);
+        }
+
+        const double rippleDb = 20.0 * std::log10 (hi / jmax (1.0e-9, lo));
+        worstRippleDb = jmax (worstRippleDb, rippleDb);
+
+        std::printf ("      %-18s modulation ripple %.3f dB peak-to-peak\n",
+                     probe.what, rippleDb);
+    }
+
+    //  A sustained tone is not a transient; the modulation should sit still on
+    //  it. Anything much above a tenth of a dB would be the detector tracking
+    //  the waveform.
+    check (worstRippleDb < 0.5,
+           "sustained tones leave the modulation flat (worst ripple "
+               + String (worstRippleDb, 3) + " dB)");
+}
+
+static void testBehaviorSweepIsMonotonic()
+{
+    section ("Phase 15: BODY -> ATTACK is monotonic on real material");
+
+    const double sr = 48000.0;
+    const int block = 256;
+
+    //  Crunch on the hit, measured as the energy of the first difference over
+    //  the 12 ms after each onset - the same measure Phase 5 uses.
+    auto crunchFor = [&] (float behavior, ColorType color)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        for (auto& b : p.bands)
+        {
+            b.color = color;
+            b.drive = 60.0f;
+            b.behavior = behavior;
+            b.space = 0.0f;
+        }
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        std::vector<float> out;
+        int s = 0;
+
+        for (int blk = 0; blk < 300; ++blk)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++s)
+            {
+                //  Kick every 250 ms: pitch drop and a fast decay.
+                const double phase = std::fmod ((double) s / sr, 0.25);
+                const double f = 120.0 * std::exp (-phase * 18.0) + 45.0;
+                d[i] = 0.7f * (float) (std::exp (-phase * 11.0)
+                                       * std::sin (2.0 * MathConstants<double>::pi * f * phase));
+            }
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (blk > 40)
+                for (int i = 0; i < block; ++i)
+                    out.push_back (io.getSample (0, i));
+        }
+
+        //  Sum |dy| over the 12 ms following every onset. The kick fires at
+        //  absolute multiples of the period, and the render only starts being
+        //  kept at block 41, so the onsets have to be found in ABSOLUTE time and
+        //  then shifted - measuring at a fixed offset into the vector lands at
+        //  an arbitrary phase of the decay, where Behavior barely shows.
+        const auto period = (size_t) (0.25 * sr);
+        const auto window = (size_t) (0.012 * sr);
+        const auto keptFrom = (size_t) (41 * block);
+
+        double energy = 0.0;
+        for (size_t absolute = period; ; absolute += period)
+        {
+            if (absolute < keptFrom)
+                continue;
+
+            const size_t onset = absolute - keptFrom;
+            if (onset + window >= out.size())
+                break;
+
+            for (size_t i = onset + 1; i < onset + window; ++i)
+                energy += std::abs ((double) out[i] - out[i - 1]);
+        }
+
+        return energy;
+    };
+
+    for (int colorIndex = 0; colorIndex < 4; ++colorIndex)
+    {
+        const auto color = (ColorType) colorIndex;
+        const double values[] = { -100.0, -50.0, 0.0, 50.0, 100.0 };
+        double crunch[5];
+
+        for (int i = 0; i < 5; ++i)
+            crunch[i] = crunchFor ((float) values[i], color);
+
+        bool monotonic = true;
+        for (int i = 1; i < 5; ++i)
+            monotonic = monotonic && crunch[i] >= crunch[i - 1] * 0.995;
+
+        const double spreadDb = 20.0 * std::log10 (crunch[4] / jmax (1.0e-12, crunch[0]));
+
+        std::printf ("      %-4s crunch BODY->ATTACK: %.3f %.3f %.3f %.3f %.3f  (spread %.2f dB)\n",
+                     engineNames[colorIndex], crunch[0], crunch[1], crunch[2],
+                     crunch[3], crunch[4], spreadDb);
+
+        check (monotonic,
+               String (engineNames[colorIndex]) + ": crunch rises monotonically from BODY to ATTACK");
+        check (spreadDb > 1.0,
+               String (engineNames[colorIndex]) + ": BODY and ATTACK are audibly different ("
+                   + String (spreadDb, 2) + " dB)");
+    }
+}
+
+// ================================================================================
+//  Phase 14: the Space estimator stays converged, and switch-on leaks nothing
+// ================================================================================
+namespace
+{
 
     //  Renders the whole engine and keeps EVERY sample from the first one. The
     //  old Space tests threw the first second away, which is exactly where a
@@ -3663,6 +3907,10 @@ int main()
     testBehaviorAttackVsBody();
     testBehaviorNoPumpingOnSustained();
     testBehaviorStereoLinked();
+
+    testBehaviorDetectorStaysWarm();
+    testBehaviorNoRippleOnSustained();
+    testBehaviorSweepIsMonotonic();
 
     testSpaceIsHarmonicOnly();
     testSpaceMonoBassAndCorrelation();

@@ -111,12 +111,12 @@ namespace fourcolor
 
         //  Behavior modulation from the CLEAN band input (before tone or
         //  drive), one stereo-linked curve shared by both channels.
-        const float* modPtrs[2] = { nullptr, nullptr };
-        if (behavior.isActive())
-        {
-            behavior.writeModulation (buffer, behaviorMod.getWritePointer (0), n);
-            modPtrs[0] = modPtrs[1] = behaviorMod.getReadPointer (0);
-        }
+        //  Always written, even at amount 0: the envelopes are the detector's
+        //  memory, and freezing them means engaging the control starts from a
+        //  picture of whatever was playing when it was last touched.
+        behavior.writeModulation (buffer, behaviorMod.getWritePointer (0), n);
+        const float* modPtrs[2] = { behaviorMod.getReadPointer (0),
+                                    behaviorMod.getReadPointer (0) };
 
         //  Drive is smoothed at block granularity: the engines' curves are
         //  continuous in drive, so 32-512 sample steps of a smoothed value
@@ -125,7 +125,7 @@ namespace fourcolor
 
         //  Wet path: pre-tone -> oversampled colour -> post-tone.
         tone.processPre (buffer);
-        nonlinear.process (buffer, behavior.isActive() ? modPtrs : nullptr);
+        nonlinear.process (buffer, modPtrs);
         tone.processPost (buffer);
 
         //  Harmonic Space: adds the diffused nonlinear residual to the wet

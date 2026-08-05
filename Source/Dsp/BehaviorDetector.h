@@ -26,15 +26,23 @@ namespace fourcolor
         void prepare (double sampleRate, int bandIndex);
         void reset();
 
-        //  behavior in [-1, 1]; 0 disables (writeModulation then writes 1.0).
+        //  behavior in [-1, 1]. At 0 the modulation is unity, but the detector
+        //  keeps running - see writeModulation.
         void setBehavior (float behavior) noexcept { amount = juce::jlimit (-1.0f, 1.0f, behavior); }
 
         //  Reads the (pre-processing) band buffer, writes a per-sample linear
         //  pre-gain factor into `modOut` (length n). Stereo-linked: one curve
         //  for both channels.
+        //
+        //  MUST be called on every block, including when the amount is 0. The
+        //  envelopes are the detector's memory of the last few hundred
+        //  milliseconds; freezing them means that moving the control off zero
+        //  starts from a picture of whatever was playing when it was last
+        //  touched, which on a running transport is simply wrong.
         void writeModulation (const juce::AudioBuffer<float>& bandInput,
                               float* modOut, int n) noexcept;
 
+        //  Whether the modulation does anything. NOT a reason to skip the call.
         bool isActive() const noexcept { return std::abs (amount) > 1.0e-3f; }
 
     private:

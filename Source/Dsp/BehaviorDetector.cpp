@@ -42,13 +42,6 @@ namespace fourcolor
     void BehaviorDetector::writeModulation (const juce::AudioBuffer<float>& bandInput,
                                             float* modOut, int n) noexcept
     {
-        if (! isActive())
-        {
-            juce::FloatVectorOperations::fill (modOut, 1.0f, n);
-            modState = 1.0f;
-            return;
-        }
-
         const int chans = bandInput.getNumChannels();
         const float* l = bandInput.getReadPointer (0);
         const float* r = chans > 1 ? bandInput.getReadPointer (1) : nullptr;
@@ -72,6 +65,9 @@ namespace fourcolor
             const float t = juce::jlimit (0.0f, 1.0f, transient * 2.0f);
 
             //  dB-linear modulation of the pre-gain, then one-pole smoothing.
+            //  At amount 0 depthDb is 0, so the target is unity and modState
+            //  RELAXES to 1.0 through the same smoother instead of snapping -
+            //  which is what makes turning the control to zero click-free.
             const float targetDb = depthDb * t;
             const float target = std::exp (targetDb * 0.115129254f);   // ln(10)/20
             modState += modSmooth * (target - modState);
