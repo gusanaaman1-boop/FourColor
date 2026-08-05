@@ -47,9 +47,14 @@ namespace fourcolor
         FourColorEngine& getEngine() noexcept { return engine; }
 
         //  --- UI services ---------------------------------------------------------
-        //  Block-peak meters (atomics written on the audio thread).
-        float readAndResetInputPeak() noexcept  { return inputPeak.exchange (0.0f); }
-        float readAndResetOutputPeak() noexcept { return outputPeak.exchange (0.0f); }
+        //  Block-peak meters (atomics written on the audio thread). Channel
+        //  0 = L, 1 = R; the mono sum forms are kept for the older callers.
+        float readAndResetInputPeak() noexcept  { return juce::jmax (inputPeak[0].exchange (0.0f),
+                                                                     inputPeak[1].exchange (0.0f)); }
+        float readAndResetOutputPeak() noexcept { return juce::jmax (outputPeak[0].exchange (0.0f),
+                                                                     outputPeak[1].exchange (0.0f)); }
+        float readAndResetInputPeak (int channel) noexcept  { return inputPeak[channel & 1].exchange (0.0f); }
+        float readAndResetOutputPeak (int channel) noexcept { return outputPeak[channel & 1].exchange (0.0f); }
 
         //  A/B compare (message thread only): two full-state slots.
         void toggleAB();
@@ -63,9 +68,11 @@ namespace fourcolor
         //  Undo of parameter edits (the editor groups transactions on idle).
         juce::UndoManager undoManager;
 
-        //  --- output spectrum tap (lock-free, mono sum) ---------------------------
-        //  The editor drains this to run its FFT; nothing is faked in the display.
-        int readSpectrumSamples (float* dest, int maxCount) noexcept;
+        //  --- output spectrum tap (lock-free, interleaved MID/SIDE) ---------------
+        //  The editor drains this to run its FFTs; nothing in the display is
+        //  faked. `dest` receives `maxFrames * 2` floats as [mid, side] pairs.
+        //  Returns the number of FRAMES written.
+        int readSpectrumFrames (float* dest, int maxFrames) noexcept;
 
         static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
@@ -111,12 +118,14 @@ namespace fourcolor
         void parameterChanged (const juce::String&, float) override { presetDirty.store (true); }
         void pushSpectrumSamples (const juce::AudioBuffer<float>& buffer) noexcept;
 
-        std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
+        std::atomic<float> inputPeak[2] { { 0.0f }, { 0.0f } };
+        std::atomic<float> outputPeak[2] { { 0.0f }, { 0.0f } };
         std::atomic<bool> presetDirty { false };
 
-        static constexpr int spectrumFifoSize = 8192;
-        juce::AbstractFifo spectrumFifo { spectrumFifoSize };
-        std::vector<float> spectrumData = std::vector<float> (spectrumFifoSize, 0.0f);
+        //  Frames of [mid, side]; sized once, never reallocated.
+        static constexpr int spectrumFifoFrames = 8192;
+        juce::AbstractFifo spectrumFifo { spectrumFifoFrames };
+        std::vector<float> spectrumData = std::vector<float> (spectrumFifoFrames * 2, 0.0f);
 
         juce::MemoryBlock abSlots[2];
         int abIndex = 0;

@@ -215,23 +215,28 @@ namespace fourcolor
         for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
             buffer.clear (ch, 0, buffer.getNumSamples());
 
-        //  Input meter (block peak, lock-free).
-        float peak = 0.0f;
-        for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
-            peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
-        if (peak > inputPeak.load (std::memory_order_relaxed))
-            inputPeak.store (peak, std::memory_order_relaxed);
+        //  Stereo input meters (block peaks, lock-free). Mono runs feed both.
+        const int meterChannels = juce::jmin (2, buffer.getNumChannels());
+        for (int m = 0; m < 2; ++m)
+        {
+            const int src = juce::jmin (m, meterChannels - 1);
+            const float peak = buffer.getMagnitude (src, 0, buffer.getNumSamples());
+            if (peak > inputPeak[m].load (std::memory_order_relaxed))
+                inputPeak[m].store (peak, std::memory_order_relaxed);
+        }
 
         pushParametersToEngine();
         engine.process (buffer);
 
         pushSpectrumSamples (buffer);
 
-        peak = 0.0f;
-        for (int ch = 0; ch < juce::jmin (2, buffer.getNumChannels()); ++ch)
-            peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, buffer.getNumSamples()));
-        if (peak > outputPeak.load (std::memory_order_relaxed))
-            outputPeak.store (peak, std::memory_order_relaxed);
+        for (int m = 0; m < 2; ++m)
+        {
+            const int src = juce::jmin (m, meterChannels - 1);
+            const float peak = buffer.getMagnitude (src, 0, buffer.getNumSamples());
+            if (peak > outputPeak[m].load (std::memory_order_relaxed))
+                outputPeak[m].store (peak, std::memory_order_relaxed);
+        }
 
         //  Quality changes alter the oversampler latency; JUCE forwards this
         //  to the host asynchronously.
@@ -240,7 +245,7 @@ namespace fourcolor
             setLatencySamples (latency);
     }
 
-    // --- output spectrum tap --------------------------------------------------------
+    // --- output spectrum tap (mid/side, lock-free, allocation-free) ------------------
     void FourColorProcessor::pushSpectrumSamples (const juce::AudioBuffer<float>& buffer) noexcept
     {
         const int n = buffer.getNumSamples();
@@ -253,10 +258,10 @@ namespace fourcolor
         {
             for (int i = 0; i < size; ++i)
             {
-                float v = buffer.getSample (0, offset + i);
-                if (chans > 1)
-                    v = 0.5f * (v + buffer.getSample (1, offset + i));
-                spectrumData[(size_t) (start + i)] = v;
+                const float l = buffer.getSample (0, offset + i);
+                const float r = chans > 1 ? buffer.getSample (1, offset + i) : l;
+                spectrumData[(size_t) ((start + i) * 2)]     = 0.5f * (l + r);   // mid
+                spectrumData[(size_t) ((start + i) * 2 + 1)] = 0.5f * (l - r);   // side
             }
         };
 
@@ -265,15 +270,21 @@ namespace fourcolor
         spectrumFifo.finishedWrite (size1 + size2);
     }
 
-    int FourColorProcessor::readSpectrumSamples (float* dest, int maxCount) noexcept
+    int FourColorProcessor::readSpectrumFrames (float* dest, int maxFrames) noexcept
     {
         int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
-        spectrumFifo.prepareToRead (maxCount, start1, size1, start2, size2);
+        spectrumFifo.prepareToRead (maxFrames, start1, size1, start2, size2);
 
         for (int i = 0; i < size1; ++i)
-            dest[i] = spectrumData[(size_t) (start1 + i)];
+        {
+            dest[i * 2]     = spectrumData[(size_t) ((start1 + i) * 2)];
+            dest[i * 2 + 1] = spectrumData[(size_t) ((start1 + i) * 2 + 1)];
+        }
         for (int i = 0; i < size2; ++i)
-            dest[size1 + i] = spectrumData[(size_t) (start2 + i)];
+        {
+            dest[(size1 + i) * 2]     = spectrumData[(size_t) ((start2 + i) * 2)];
+            dest[(size1 + i) * 2 + 1] = spectrumData[(size_t) ((start2 + i) * 2 + 1)];
+        }
 
         spectrumFifo.finishedRead (size1 + size2);
         return size1 + size2;
