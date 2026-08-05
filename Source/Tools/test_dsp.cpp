@@ -990,13 +990,22 @@ static void testColorSwitchAndLatency()
     NonlinearStage stage;
     stage.prepare (sr, 512, 1);
 
+    //  Phase 12 contract: the reported latency is the SAME for every quality.
+    //  Each oversampler's own latency is padded up to the worst case.
+    const float reported = stage.getLatencySamples();
+    for (int q = 0; q < 4; ++q)
+    {
+        const float raw = stage.getRawLatencySamples ((Quality) q);
+        std::printf ("      quality %dx: oversampler %.3f + pad %.3f = %.3f samples\n",
+                     1 << q, raw, reported - raw, reported);
+    }
+
     for (int q = 0; q < 4; ++q)
     {
         stage.setQuality ((Quality) q);
-        std::printf ("      quality %dx latency: %.2f samples\n", 1 << q, stage.getLatencySamples());
-        check (q == 0 ? stage.getLatencySamples() == 0.0f
-                      : stage.getLatencySamples() > 0.0f,
-               "latency reported for quality " + String (1 << q) + "x");
+        check (stage.getLatencySamples() == reported,
+               "quality " + String (1 << q) + "x reports the same latency ("
+                   + String (stage.getLatencySamples(), 3) + ")");
     }
 
     //  Switch colour mid-playback. A hard-driven engine legitimately outputs
@@ -1331,10 +1340,201 @@ static void testQualitySwitchDuringPlayback()
     }
 
     check (finite, "output stays finite through quality switches");
-    check (latencies[0] == 0, "draft (1x) reports zero latency");
-    check (latencies[1] > 0 && latencies[2] > latencies[1] && latencies[3] > latencies[2],
-           "latency grows with quality (" + String (latencies[0]) + "/" + String (latencies[1])
-               + "/" + String (latencies[2]) + "/" + String (latencies[3]) + " smp)");
+
+    //  Phase 12 replaced "latency grows with quality" with the opposite
+    //  promise: it never moves, so a host is never handed a new number while
+    //  the transport is running.
+    check (latencies[0] == 65 && latencies[1] == 65 && latencies[2] == 65 && latencies[3] == 65,
+           "latency is 65 samples in every quality (" + String (latencies[0]) + "/"
+               + String (latencies[1]) + "/" + String (latencies[2]) + "/"
+               + String (latencies[3]) + " smp)");
+}
+
+// ================================================================================
+//  Phase 12: switching Quality during playback
+// ================================================================================
+static void testQualitySwitchIsSeamless()
+{
+    section ("Phase 12: Quality switches are click-free and time-invariant");
+
+    const double sr = 48000.0;
+    const int block = 128;
+
+    //  Three programme types, because a discontinuity hides in different places
+    //  in each: a tone shows steps, noise shows dropouts, a transient train
+    //  shows smearing.
+    enum class Material { sine, pinkish, transients };
+    const char* materialNames[] = { "sine", "pink-ish noise", "transient train" };
+
+    auto fill = [] (AudioBuffer<float>& buf, Material m, int startSample, Random& rng,
+                    float& pinkState)
+    {
+        for (int i = 0; i < buf.getNumSamples(); ++i)
+        {
+            const int s = startSample + i;
+            float v = 0.0f;
+
+            switch (m)
+            {
+                case Material::sine:
+                    v = 0.3f * (float) std::sin (2.0 * MathConstants<double>::pi * 220.0 * s / 48000.0);
+                    break;
+                case Material::pinkish:
+                    //  One-pole lowpassed white: broadband but not full-scale HF.
+                    pinkState += 0.12f * (rng.nextFloat() * 2.0f - 1.0f - pinkState);
+                    v = 0.9f * pinkState;
+                    break;
+                case Material::transients:
+                {
+                    const double phase = std::fmod ((double) s / 48000.0, 0.125);
+                    v = 0.6f * (float) (std::exp (-phase * 40.0)
+                                        * std::sin (2.0 * MathConstants<double>::pi * 90.0 * phase));
+                    break;
+                }
+            }
+
+            for (int c = 0; c < buf.getNumChannels(); ++c)
+                buf.setSample (c, i, v);
+        }
+    };
+
+    //  Envelope continuity, in dB between adjacent 32-sample windows. A click
+    //  or a dropout shows up here whatever the material is, and the number is
+    //  compared against the same measurement taken far from the switch, so the
+    //  material's own liveliness cancels out. A raw "max sample step" budget
+    //  only means something for smooth material - pink noise's own steps are
+    //  0.3 FS, which is fifteen times the 0.02 FS budget.
+    auto worstEnvelopeJumpDb = [] (const std::vector<float>& x, size_t first, size_t last)
+    {
+        constexpr size_t win = 32;
+        double worst = 0.0, prev = -1.0;
+
+        for (size_t w = first; w + win <= last; w += win)
+        {
+            double sumSq = 0.0;
+            for (size_t i = 0; i < win; ++i)
+                sumSq += (double) x[w + i] * x[w + i];
+            const double rms = std::sqrt (sumSq / (double) win) + 1.0e-9;
+
+            if (prev > 0.0)
+                worst = jmax (worst, std::abs (20.0 * std::log10 (rms / prev)));
+            prev = rms;
+        }
+        return worst;
+    };
+
+    const int switchBlock = 60, keptFromBlock = 20;
+    const size_t switchSample = (size_t) ((switchBlock - keptFromBlock) * block);
+
+    for (int m = 0; m < 3; ++m)
+    {
+        double worstStep = 0.0, baselineStep = 0.0, worstExcessDb = 0.0, worstPreSwitchDiff = 0.0;
+        int longestSilentRun = 0;
+
+        //  Every ordered pair of qualities.
+        for (int from = 0; from < 4; ++from)
+        {
+            for (int to = 0; to < 4; ++to)
+            {
+                if (from == to)
+                    continue;
+
+                //  Two renders of the same input: one that switches, one that
+                //  never does. Everything before the switch must be identical.
+                std::vector<float> out[2];
+
+                for (int variant = 0; variant < 2; ++variant)
+                {
+                    FourColorEngine engine;
+                    engine.prepare (sr, block, 2);
+
+                    EngineParameters p;
+                    p.autoLevel = false;
+                    p.quality = (Quality) from;
+                    for (auto& b : p.bands)
+                        b.drive = 45.0f;
+                    engine.setParameters (p);
+
+                    AudioBuffer<float> io (2, block);
+                    Random rng (1234);
+                    float pinkState = 0.0f;
+                    int s = 0;
+
+                    for (int blk = 0; blk < 140; ++blk)
+                    {
+                        if (variant == 1 && blk == switchBlock)
+                        {
+                            p.quality = (Quality) to;
+                            engine.setParameters (p);
+                        }
+
+                        fill (io, (Material) m, s, rng, pinkState);
+                        s += block;
+                        engine.process (io);
+
+                        if (blk >= keptFromBlock)
+                            for (int i = 0; i < block; ++i)
+                                out[variant].push_back (io.getSample (0, i));
+                    }
+                }
+
+                //  1. Nothing before the switch may change.
+                for (size_t i = 0; i < switchSample; ++i)
+                    worstPreSwitchDiff = jmax (worstPreSwitchDiff,
+                                               std::abs ((double) out[1][i] - out[0][i]));
+
+                //  2. Envelope continuity across the switch, against the same
+                //     measurement on quiet ground well before it.
+                const double baselineDb = worstEnvelopeJumpDb (out[1], 0, switchSample - block);
+                const double switchDb = worstEnvelopeJumpDb (out[1], switchSample - block,
+                                                             switchSample + 4 * (size_t) block);
+                worstExcessDb = jmax (worstExcessDb, switchDb - baselineDb);
+
+                //  3. Raw step and dropout length, reported for every material
+                //     and asserted only where the budget is meaningful.
+                int silentRun = 0;
+                for (size_t i = switchSample - (size_t) block;
+                     i < switchSample + 4 * (size_t) block; ++i)
+                {
+                    worstStep = jmax (worstStep, std::abs ((double) out[1][i] - out[1][i - 1]));
+                    if (std::abs (out[1][i]) < 1.0e-7f)
+                    { ++silentRun; longestSilentRun = jmax (longestSilentRun, silentRun); }
+                    else silentRun = 0;
+                }
+
+                //  The same measure taken well away from the switch, so the
+                //  number above can be read as "signal" or "click".
+                for (size_t i = (size_t) block + 1; i < switchSample - (size_t) block; ++i)
+                    baselineStep = jmax (baselineStep, std::abs ((double) out[1][i] - out[1][i - 1]));
+            }
+        }
+
+        std::printf ("      %-16s pre-switch diff %.9f, envelope excess %+.2f dB,"
+                     " step %.5f FS (same material away from the switch: %.5f), silent run %d\n",
+                     materialNames[m], worstPreSwitchDiff, worstExcessDb,
+                     worstStep, baselineStep, longestSilentRun);
+
+        check (worstPreSwitchDiff == 0.0,
+               String (materialNames[m])
+                   + ": a Quality change alters nothing before it happens (diff "
+                   + String (worstPreSwitchDiff, 9) + ")");
+
+        check (worstExcessDb < 1.0,
+               String (materialNames[m])
+                   + ": the switch adds no envelope discontinuity beyond the material's own ("
+                   + String (worstExcessDb, 2) + " dB)");
+
+        check (longestSilentRun <= 1,
+               String (materialNames[m]) + ": no dropout longer than one sample ("
+                   + String (longestSilentRun) + ")");
+
+        //  The spec's 0.02 FS budget, applied where a sample step is a
+        //  meaningful measure at all.
+        if (m != 1)
+            check (worstStep < 0.02,
+                   String (materialNames[m]) + ": no switch steps more than 0.02 FS ("
+                       + String (worstStep, 5) + ")");
+    }
 }
 
 // ================================================================================
@@ -2657,6 +2857,7 @@ int main()
     testSoloMuteLevel();
     testEngineMatrix();
     testQualitySwitchDuringPlayback();
+    testQualitySwitchIsSeamless();
 
     testBehaviorAttackVsBody();
     testBehaviorNoPumpingOnSustained();

@@ -50,6 +50,7 @@ namespace fourcolor
         void process (juce::AudioBuffer<float>& buffer) noexcept;
 
         float getLatencySamples() const noexcept { return nonlinear.getLatencySamples(); }
+        float getRawLatencySamples (Quality q) const noexcept { return nonlinear.getRawLatencySamples (q); }
 
         //  Block peak of this band's OUTPUT (post mix/level/mute), for the UI
         //  band meters. Lock-free; the reader exchanges it back to zero.

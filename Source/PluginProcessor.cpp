@@ -238,11 +238,9 @@ namespace fourcolor
                 outputPeak[m].store (peak, std::memory_order_relaxed);
         }
 
-        //  Quality changes alter the oversampler latency; JUCE forwards this
-        //  to the host asynchronously.
-        const int latency = engine.getLatencySamples();
-        if (latency != getLatencySamples())
-            setLatencySamples (latency);
+        //  Latency is a constant of the design and was reported in
+        //  prepareToPlay. Telling a host about a new latency while the
+        //  transport is running is exactly what Phase 12 set out to stop.
     }
 
     // --- output spectrum tap (mid/side, lock-free, allocation-free) ------------------

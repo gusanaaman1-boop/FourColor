@@ -111,10 +111,9 @@ namespace fourcolor
             std::sqrt (f2 * f3),    std::sqrt (f3 * 16000.0f)
         };
 
-        bool qualityChanged = false;
         for (int b = 0; b < numBands; ++b)
         {
-            qualityChanged = bands[b].setQuality (p.quality) || qualityChanged;
+            bands[b].setQuality (p.quality);
 
             //  Global Drive scales the four RELATIVE band drives around their
             //  values: 50 is neutral, 0 silences the drive, 100 doubles it.
@@ -135,14 +134,10 @@ namespace fourcolor
             bands[b].setSettings (s);
         }
 
-        if (qualityChanged)
-        {
-            //  New oversampler latency: realign both compensation delays. The
-            //  host is told through getLatencySamples() by the processor.
-            dryDelay.reset();
-            wetAlign.reset();
-            updateLatency();
-        }
+        //  No latency bookkeeping on a Quality change: NonlinearStage pads every
+        //  quality to the same latency, so dryDelay, mixDryDelay and wetAlign
+        //  are already correct. Resetting them here used to punch a hole in the
+        //  dry and bypass legs each time Quality moved.
     }
 
     void FourColorEngine::process (juce::AudioBuffer<float>& buffer) noexcept

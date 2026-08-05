@@ -74,13 +74,10 @@ namespace fourcolor
 
     bool BandProcessor::setQuality (Quality q) noexcept
     {
-        const bool changed = nonlinear.setQuality (q);
-        if (changed)
-        {
-            cleanDelay.reset();
-            updateCleanDelay();
-        }
-        return changed;
+        //  Since Phase 12 every quality reports the same latency, so the clean
+        //  delay is already correct and must NOT be reset - clearing it here
+        //  was a dropout on the clean leg every time Quality was touched.
+        return nonlinear.setQuality (q);
     }
 
     void BandProcessor::process (juce::AudioBuffer<float>& buffer) noexcept
