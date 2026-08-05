@@ -2,19 +2,24 @@ FOUR COLOR — Windows install
 Multiband Colour & Saturation · by Gussa Naaman · v0.1.0 · x64
 
 ------------------------------------------------------------------------------
-INSTALL
+INSTALL - this is the whole thing
 ------------------------------------------------------------------------------
 
-  1. EXTRACT this ZIP to a real folder first.
-     Do not run the installer from inside the ZIP viewer - Windows copies the
-     .bat somewhere on its own and leaves the plugin behind, and then there is
-     nothing to install.
+  1. EXTRACT this ZIP into your FourColor folder - the same folder you ran
+     the build from, the one containing build-win\.
+     Do not run the .bat from inside the ZIP viewer: Windows copies it out on
+     its own and then it has nothing to install.
 
-  2. Close Cubase (or whatever host you use).
+  2. Close Cubase.
      Windows will not replace a plugin a running host has open. This is the
      usual reason an update appears to do nothing.
 
   3. RIGHT-CLICK  INSTALL-FOUR-COLOR.bat  ->  "Run as administrator".
+
+  The installer FINDS the plug-in itself. It looks beside itself first, then
+  in build-win\FourColor_artefacts\Release\, then dist\, so it works whether
+  you were sent a package or you built the source yourself. It prints the path
+  it chose before it does anything.
 
   It installs:
 

@@ -57,9 +57,9 @@ productbuild --distribution "$STAGE/Distribution.xml" \
              --package-path "$STAGE" \
              "$STAGE/FourColor-$VERSION-macOS.pkg" > /dev/null
 
-cp "$PROJ/packaging/README-INSTALL.txt" "$STAGE/"
+cp "$PROJ/packaging/README-INSTALL-MAC.txt" "$STAGE/"
 ( cd "$STAGE" && zip -q -X "FourColor-$VERSION-macOS.zip" \
-      "FourColor-$VERSION-macOS.pkg" README-INSTALL.txt )
+      "FourColor-$VERSION-macOS.pkg" README-INSTALL-MAC.txt )
 mv "$STAGE/FourColor-$VERSION-macOS.zip" "$DIST/"
 rm -rf "$STAGE"
 

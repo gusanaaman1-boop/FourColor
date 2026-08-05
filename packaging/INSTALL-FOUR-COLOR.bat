@@ -22,26 +22,47 @@ if errorlevel 1 (
 )
 echo  [OK] Running as administrator.
 
-REM --- the payload must be sitting next to this file ---------------------------
-REM Running the .bat straight out of the ZIP viewer copies it to a temp folder
-REM on its own, and then there is nothing to install. Catch that here rather
-REM than failing later with an unhelpful error.
-set "SRC=%~dp0FourColor.vst3"
+REM --- find the plug-in --------------------------------------------------------
+REM Beside this file first (that is how the packaged folder is laid out), then
+REM the usual build output paths, so this same installer works whether you were
+REM sent a package or you just built the source yourself.
+set "SRC="
 
-if not exist "%SRC%\" (
-    echo  [X] FourColor.vst3 was not found next to this installer.
+for %%D in (
+    "%~dp0FourColor.vst3"
+    "%~dp0dist\FourColor-windows-x64\FourColor.vst3"
+    "%~dp0build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
+    "%~dp0..\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
+    "%~dp0..\..\build-win\FourColor_artefacts\Release\VST3\FourColor.vst3"
+    "%~dp0build\FourColor_artefacts\Release\VST3\FourColor.vst3"
+    "%~dp0..\build\FourColor_artefacts\Release\VST3\FourColor.vst3"
+) do (
+    if not defined SRC if exist "%%~D\" set "SRC=%%~D"
+)
+
+if not defined SRC (
+    echo  [X] Could not find FourColor.vst3 anywhere.
     echo.
-    echo      Looked in: %~dp0
+    echo      Looked beside this file:
+    echo        %~dp0
+    echo      and in the usual build output folders under it.
     echo.
-    echo      You are probably running this from inside the ZIP.
-    echo      EXTRACT the whole ZIP to a real folder first
-    echo      ^(right-click the ZIP -^> "Extract All"^), then run
-    echo      INSTALL-FOUR-COLOR.bat from the extracted folder.
+    echo      Two likely reasons:
+    echo.
+    echo      1. You are running this from INSIDE the ZIP viewer. Windows
+    echo         copies the .bat out on its own and leaves the plugin behind.
+    echo         EXTRACT the whole ZIP to a real folder first
+    echo         ^(right-click the ZIP -^> "Extract All"^), then run it again.
+    echo.
+    echo      2. You have the source but have not built it yet. Run:
+    echo            scripts\build-windows.bat both --clean
+    echo         then run this installer again.
     echo.
     pause
     exit /b 1
 )
-echo  [OK] Found FourColor.vst3 to install.
+echo  [OK] Found the plugin to install:
+echo       !SRC!
 
 set "DEST=C:\Program Files\Common Files\VST3"
 if not exist "%DEST%\" mkdir "%DEST%" 2>nul
@@ -96,11 +117,11 @@ echo        done.
 
 REM --- install the VST3 ---------------------------------------------------------
 echo  [2/4] Installing the VST3 ...
-xcopy /e /i /y "%SRC%" "%DEST%\FourColor.vst3\" >nul
+xcopy /e /i /y "!SRC!" "%DEST%\FourColor.vst3\" >nul
 if errorlevel 1 (
     echo.
     echo  [X] Copy failed.
-    echo      Source: %SRC%
+    echo      Source: !SRC!
     echo      Target: %DEST%\FourColor.vst3
     echo.
     pause
@@ -125,10 +146,20 @@ echo        verified.
 
 REM --- the standalone, if it shipped alongside ---------------------------------
 echo  [4/4] Standalone app...
-if exist "%~dp0FourColor.exe" (
+set "EXE="
+for %%E in (
+    "%~dp0FourColor.exe"
+    "%~dp0dist\FourColor-windows-x64\FourColor.exe"
+    "%~dp0build-win\FourColor_artefacts\Release\Standalone\FourColor.exe"
+    "%~dp0..\build-win\FourColor_artefacts\Release\Standalone\FourColor.exe"
+) do (
+    if not defined EXE if exist "%%~E" set "EXE=%%~E"
+)
+
+if defined EXE (
     set "APPDIR=C:\Program Files\Naaman\FOUR COLOR"
     if not exist "!APPDIR!\" mkdir "!APPDIR!" 2>nul
-    copy /y "%~dp0FourColor.exe" "!APPDIR!\FourColor.exe" >nul
+    copy /y "!EXE!" "!APPDIR!\FourColor.exe" >nul
     if exist "!APPDIR!\FourColor.exe" (
         echo        installed to !APPDIR!
     ) else (
