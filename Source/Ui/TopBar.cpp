@@ -1,6 +1,7 @@
 #include "TopBar.h"
 
 #include "../Core/PresetLibrary.h"
+#include "../Core/ProductInfo.h"
 #include "../PluginProcessor.h"
 
 namespace fourcolor::ui
@@ -206,22 +207,60 @@ namespace fourcolor::ui
             g.fillRect (0.0f, bounds.getBottom() + (float) i, bounds.getWidth(), 1.0f);
         }
 
-        //  Wordmark: light, widely spaced, never bold.
+        //  Maker's mark: the Naaman monogram, redrawn from Website/assets/logo.svg
+        //  (a ring with an N built from two uprights and a gold diagonal), then
+        //  the wordmark with the maker's name set quietly beneath it.
+        auto textArea = logoArea.toFloat();
+        {
+            const float d = juce::jmin (26.0f, textArea.getHeight() - 6.0f);
+            auto ring = juce::Rectangle<float> (d, d)
+                            .withCentre ({ textArea.getX() + d * 0.5f, textArea.getCentreY() });
+
+            //  The SVG is drawn on a 40x40 grid; these are its coordinates scaled.
+            const float s = d / 40.0f;
+            const auto at = [&ring, s] (float x, float y)
+            {
+                return juce::Point<float> (ring.getX() + x * s, ring.getY() + y * s);
+            };
+
+            g.setColour (juce::Colour (0xffeae7e0).withAlpha (0.28f));
+            g.drawEllipse (ring.reduced (d * (20.0f - 18.25f) / 40.0f), s);
+
+            g.setColour (juce::Colour (0xffeae7e0));
+            g.drawLine ({ at (13.2f, 27.4f), at (13.2f, 12.6f) }, 1.5f * s);
+            g.drawLine ({ at (26.8f, 27.4f), at (26.8f, 12.6f) }, 1.5f * s);
+
+            g.setColour (juce::Colour (0xffc9a86a));
+            g.drawLine ({ at (13.2f, 12.6f), at (26.8f, 27.4f) }, 1.5f * s);
+
+            textArea.removeFromLeft (d + 11.0f);
+        }
+
+        const auto markFont = captionFont (8.5f).withExtraKerningFactor (0.34f);
+        const float markHeight = 11.0f;
+        auto nameArea = textArea.withTrimmedBottom (markHeight);
+        auto markArea = textArea.removeFromBottom (markHeight);
+
         g.setFont (uiFont (17.0f).withExtraKerningFactor (0.30f));
         g.setColour (tokens::textPrimary);
-        const auto textArea = logoArea.toFloat();
-        g.drawText ("FOUR COLOR", textArea, juce::Justification::centredLeft);
+        g.drawText ("FOUR COLOR", nameArea, juce::Justification::centredLeft);
+
+        const float wordmarkWidth =
+            juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), "FOUR COLOR");
+
+        g.setFont (markFont);
+        g.setColour (tokens::textMuted);
+        g.drawText (productInfo::maker, markArea.withWidth (wordmarkWidth),
+                    juce::Justification::centredLeft);
 
         //  Four band dots after the wordmark.
         const float dotSize = 7.0f;
-        const float dotsX = textArea.getX()
-                          + juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), "FOUR COLOR")
-                          + 16.0f;
+        const float dotsX = textArea.getX() + wordmarkWidth + 16.0f;
         for (int i = 0; i < 4; ++i)
         {
             g.setColour (tokens::band[i]);
             g.fillEllipse (dotsX + (float) i * (dotSize + 7.0f),
-                           textArea.getCentreY() - dotSize * 0.5f, dotSize, dotSize);
+                           nameArea.getCentreY() - dotSize * 0.5f, dotSize, dotSize);
         }
 
         //  The "/" between A and B.
@@ -235,7 +274,7 @@ namespace fourcolor::ui
     {
         auto area = getLocalBounds().reduced (16, 9);
 
-        logoArea = area.removeFromLeft (215);
+        logoArea = area.removeFromLeft (258);
 
         powerButton->setBounds (area.removeFromRight (34));
         area.removeFromRight (10);
