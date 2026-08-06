@@ -1,11 +1,17 @@
 # FOUR COLOR — end of the 30% round
 
-**Status: not a Release Candidate, and the platform question is still open.**
-Windows was briefly recorded here as building and running, on the strength of
-one message. A later installer run searched the entire Windows user profile
-and found no FourColor.vst3 at all, so that claim is withdrawn: it should not
-have been written down as fact from a single sentence. Three items of the
-brief remain outstanding and one acceptance criterion is missed.
+**Status: not a Release Candidate, but Windows is now built and evidenced.**
+GitHub Actions run 31030970761 compiled the plug-in with MSVC on windows-2022,
+with /WX, in both Release and Debug, and both reported *369 checks, 1 failed* —
+the same single known miss macOS reports. The artefact is a real x64 VST3.
+
+This claim has a run ID behind it. An earlier version of this file asserted the
+same thing from one sentence in chat and had to be withdrawn when an installer
+search of the whole Windows user profile found no plug-in at all; that is the
+difference between a report and a guess.
+
+Three items of the brief remain outstanding and one acceptance criterion is
+missed.
 
 Head: `fbe9e95`. 369 checks, **1 failing** (deliberately — see §5).
 
@@ -21,7 +27,7 @@ Head: `fbe9e95`. 369 checks, **1 failing** (deliberately — see §5).
 | Debug, all three | OK |
 | ASan + UBSan test build | OK, 0 findings |
 | Warnings from FOUR COLOR sources, `-Werror` on | **0**, Release and Debug |
-| **Windows** | **UNCONFIRMED.** Reported working on 2026-08-05, but an installer search of the whole user profile that evening found no FourColor.vst3 on the machine. Treat as NOT BUILT until a path to one exists. |
+| **Windows VST3 + Standalone** | **BUILT by CI**, MSVC x64, `/WX` clean. Run 31030970761. Release and Debug both 369 checks / 1 known failure. Not yet loaded in Cubase. |
 
 macOS 26.3.2, Apple clang 21.0.0, CMake 4.4.0, JUCE `857aab9c`, universal
 arm64 + x86_64.

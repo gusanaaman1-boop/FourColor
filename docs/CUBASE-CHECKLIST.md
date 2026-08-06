@@ -1,9 +1,10 @@
 # FOUR COLOR — Cubase 15 host validation checklist
 
-**STATUS: Windows UNCONFIRMED.** It was briefly recorded here as building and
-running. A later installer run searched the whole Windows user profile and
-found no `FourColor.vst3`, so there is no evidence a Windows build exists.
-Every row below stays `[ ]`.
+**STATUS: a Windows x64 VST3 now EXISTS** — built by GitHub Actions run
+31030970761 with MSVC, `/WX` clean, 369 checks / 1 known failure in both
+Release and Debug. It has not been loaded in Cubase on either platform, so
+every row below stays `[ ]`. Having a binary is the start of this checklist,
+not the end of it.
 
 Correcting an earlier claim in this file: **Cubase 15 is installed on this Mac**
 (`/Applications/Cubase 15.app`). What is missing is **Windows**, not Cubase. So this
