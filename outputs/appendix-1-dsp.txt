@@ -84,343 +84,506 @@ namespace fourcolor
 }
 
 
-===== FILE: Source/Dsp/TptFilters.h =====
+===== FILE: Source/Dsp/BehaviorDetector.h =====
 
-// Small header-only filter primitives used across the DSP.
+// SHAPE: the BODY <-> ATTACK axis. Two envelope followers on the same stereo-
+// linked signal - one fast, one slow - feeding two DIFFERENT mechanisms, one
+// per side, both modulating the colour engine's pre-gain:
 //
-// The state-variable filter is the TPT/ZDF formulation (Zavalishin, "The Art
-// of VA Filter Design"), chosen because it stays stable and well-behaved under
-// per-block coefficient modulation - which is what makes dragging a crossover
-// handle during playback safe.
-
-#pragma once
-
-#include <cmath>
-
-namespace fourcolor::dsp
-{
-    //  One second-order TPT SVF section. Outputs low / band / high / allpass
-    //  from the same state. Coefficients are set explicitly so a caller can
-    //  share one coefficient computation across channels and sections.
-    struct TptSvf
-    {
-        //  g = tan(pi * fc / fs), damping = 1/Q. Butterworth: damping = sqrt(2).
-        void setCoefficients (float g, float damping) noexcept
-        {
-            k  = damping;
-            a1 = 1.0f / (1.0f + g * (g + damping));
-            a2 = g * a1;
-            a3 = g * a2;
-        }
-
-        void reset() noexcept { ic1 = ic2 = 0.0f; }
-
-        struct Outputs { float low, band, high; };
-
-        Outputs process (float x) noexcept
-        {
-            const float v3 = x - ic2;
-            const float v1 = a1 * ic1 + a2 * v3;   // band
-            const float v2 = ic2 + a2 * ic1 + a3 * v3;   // low
-            ic1 = 2.0f * v1 - ic1;
-            ic2 = 2.0f * v2 - ic2;
-            return { v2, v1, x - k * v1 - v2 };
-        }
-
-        float processLow  (float x) noexcept { return process (x).low; }
-        float processHigh (float x) noexcept { return process (x).high; }
-
-        //  Second-order allpass with the section's Q: (s^2 - k w s + w^2) / D.
-        float processAllpass (float x) noexcept
-        {
-            const auto o = process (x);
-            return x - 2.0f * k * o.band;
-        }
-
-        float a1 = 0.0f, a2 = 0.0f, a3 = 0.0f, k = 1.41421356f;
-        float ic1 = 0.0f, ic2 = 0.0f;
-    };
-
-    inline float svfG (double sampleRate, float cutoffHz) noexcept
-    {
-        //  Clamp well below Nyquist; tan() explodes at fs/2.
-        const float limited = std::fmin (cutoffHz, (float) sampleRate * 0.49f);
-        return std::tan (3.14159265358979f * limited / (float) sampleRate);
-    }
-
-    //  One-pole low-pass (6 dB/oct), also usable as a smoother.
-    struct OnePole
-    {
-        void setCutoff (double sampleRate, float cutoffHz) noexcept
-        {
-            const float x = std::exp (-2.0f * 3.14159265f * cutoffHz / (float) sampleRate);
-            a = 1.0f - x;
-            b = x;
-        }
-
-        void reset (float value = 0.0f) noexcept { z = value; }
-
-        float process (float x) noexcept { z = a * x + b * z; return z; }
-        float processHigh (float x) noexcept { return x - process (x); }
-
-        float a = 1.0f, b = 0.0f, z = 0.0f;
-    };
-
-    //  DC blocker: first-order high-pass around 10 Hz.
-    struct DcBlocker
-    {
-        void prepare (double sampleRate, float cutoffHz = 10.0f) noexcept
-        {
-            R = 1.0f - 2.0f * 3.14159265f * cutoffHz / (float) sampleRate;
-            if (R < 0.9f) R = 0.9f;
-        }
-
-        void reset() noexcept { x1 = y1 = 0.0f; }
-
-        float process (float x) noexcept
-        {
-            const float y = x - x1 + R * y1;
-            x1 = x;
-            y1 = y;
-            return y;
-        }
-
-        float R = 0.995f, x1 = 0.0f, y1 = 0.0f;
-    };
-}
-
-
-===== FILE: Source/Dsp/Crossover.h =====
-
-// Four-band Linkwitz-Riley (24 dB/oct) crossover tree with allpass
-// compensation, so the four bands sum back to a pure allpass of the input:
-// flat magnitude by construction. See docs/ARCHITECTURE.md for the derivation.
+//   ATTACK (+): transient-driven. The fast/slow difference raises pre-gain on
+//               the hit, so the attack gets crunch and the tail stays calm.
 //
-//   lowHalf  = LP4(f2, x)          highHalf = HP4(f2, x)
-//   band0    = AP2(f3, LP4(f1, lowHalf))
-//   band1    = AP2(f3, HP4(f1, lowHalf))
-//   band2    = AP2(f1, LP4(f3, highHalf))
-//   band3    = AP2(f1, HP4(f3, highHalf))
+//   BODY   (-): DEFICIT-driven, and not merely the mirror of ATTACK. It asks
+//               how far the signal has fallen below its own recent reference,
+//               and lifts exactly that shortfall into the engine - so decays,
+//               sustains and the quiet half of a phrase get colour they were
+//               not getting, while the initial transient is left alone.
 //
-// Cutoffs are smoothed and coefficients recomputed on a 32-sample control
-// grid, which makes crossover automation click-free without per-sample tan().
+//               Reducing transient drive, which is all the old negative side
+//               did, made the hit duller without ever making the body denser.
+//
+// Both sides are bounded, smoothed per sample, and gated so that silence and
+// noise floors are never lifted.
+//
+// Time constants scale per band: a "fast" 1 ms follower on a 40 Hz band would
+// just track the waveform, so the low bands use slower clocks than the top.
+// Modulation depth is bounded to +/-6 dB and smoothed, which is what keeps
+// this from becoming a pumping compressor.
 
 #pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include "../Core/ParameterIds.h"
-#include "TptFilters.h"
 
 namespace fourcolor
 {
-    class Crossover
+    class BehaviorDetector
     {
     public:
-        Crossover() = default;
+        BehaviorDetector() = default;
 
-        static constexpr int controlInterval = 32;   // samples between coefficient updates
-        static constexpr float minRatio = 1.30f;     // enforced spacing between adjacent cuts
-
-        void prepare (double sampleRate, int maxBlockSize, int numChannels);
+        void prepare (double sampleRate, int bandIndex);
         void reset();
 
-        //  Target frequencies; smoothed internally. Spacing is enforced here:
-        //  f2 is authoritative, f1 is pushed down and f3 pushed up if needed.
-        void setFrequencies (float f1, float f2, float f3) noexcept;
+        //  behavior in [-1, 1]. At 0 the modulation is unity, but the detector
+        //  keeps running - see writeModulation.
+        void setBehavior (float behavior) noexcept { amount = juce::jlimit (-1.0f, 1.0f, behavior); }
 
-        //  Splits `input` into four band buffers. Each destination must have at
-        //  least the input's channel count and length. Also writes the allpass
-        //  reference (what the four bands sum to) into `allpassRef` if non-null.
-        void process (const juce::AudioBuffer<float>& input,
-                      juce::AudioBuffer<float>* bands,           // array of numBands buffers
-                      juce::AudioBuffer<float>* allpassRef = nullptr) noexcept;
+        //  Reads the (pre-processing) band buffer, writes a per-sample linear
+        //  pre-gain factor into `modOut` (length n). Stereo-linked: one curve
+        //  for both channels.
+        //
+        //  MUST be called on every block, including when the amount is 0. The
+        //  envelopes are the detector's memory of the last few hundred
+        //  milliseconds; freezing them means that moving the control off zero
+        //  starts from a picture of whatever was playing when it was last
+        //  touched, which on a running transport is simply wrong.
+        void writeModulation (const juce::AudioBuffer<float>& bandInput,
+                              float* modOut, int n) noexcept;
 
-        //  The frequencies actually in use after spacing enforcement + smoothing.
-        float getCurrentFrequency (int index) const noexcept { return currentHz[index]; }
+        //  Whether the modulation does anything. NOT a reason to skip the call.
+        bool isActive() const noexcept { return std::abs (amount) > 1.0e-3f; }
 
     private:
-        void updateCoefficients() noexcept;
+        float amount = 0.0f;
 
-        struct ChannelState
-        {
-            //  f2 split: shared first stage + one second stage per side.
-            dsp::TptSvf mid1, midLow2, midHigh2;
-            //  f1 split of the low half.
-            dsp::TptSvf low1, lowLow2, lowHigh2;
-            //  f3 split of the high half.
-            dsp::TptSvf high1, highLow2, highHigh2;
-            //  Compensation allpasses.
-            dsp::TptSvf apLowSide;    // AP2 at f3, applied to bands 0 and 1 input
-            dsp::TptSvf apHighSide;   // AP2 at f1, applied to bands 2 and 3 input
-            //  Reference path: AP2(f1) AP2(f2) AP2(f3).
-            dsp::TptSvf refAp1, refAp2, refAp3;
+        //  One-pole coefficients (attack/release pairs) for the two followers
+        //  and the modulation smoother.
+        float fastAtk = 0.0f, fastRel = 0.0f;
+        float slowAtk = 0.0f, slowRel = 0.0f;
+        float modSmooth = 0.0f;
 
-            void reset()
-            {
-                for (auto* f : { &mid1, &midLow2, &midHigh2, &low1, &lowLow2, &lowHigh2,
-                                 &high1, &highLow2, &highHigh2,
-                                 &apLowSide, &apHighSide, &refAp1, &refAp2, &refAp3 })
-                    f->reset();
-            }
-        };
+        float fastEnv = 0.0f, slowEnv = 0.0f, modState = 1.0f;
 
-        double sampleRate = 44100.0;
-        int numChannels = 2;
+        //  BODY's reference: a slow peak-following envelope that falls far more
+        //  slowly than it rises, so it remembers how loud the passage has just
+        //  been. The deficit is measured against this, not against a fixed
+        //  level, which is what keeps BODY musical across a quiet verse and a
+        //  loud chorus alike.
+        float referenceEnv = 0.0f;
+        float referenceRise = 0.0f, referenceFall = 0.0f;
 
-        float targetHz[3]  = { 120.0f, 700.0f, 4500.0f };
-        float currentHz[3] = { 120.0f, 700.0f, 4500.0f };
-        float smoothCoeff  = 0.0f;   // per-control-tick one-pole coefficient
+        //  ATTACK depth. +/-6 dB was measured to move the kick's attack-crunch
+        //  spread only 1.3 dB, too subtle for the product's headline control.
+        static constexpr float maxModDb = 9.0f;
 
-        ChannelState channels[2];
+        //  BODY depth, and the deficit window it is measured over. 18 dB below
+        //  the running reference is where the lift reaches full depth; further
+        //  down than that is a decay tail or a gap, and the noise gate takes
+        //  over before it can be lifted.
+        static constexpr float maxBodyDb = 6.0f;
 
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Crossover)
+        //  How much of BODY's depth applies to ANY non-transient material,
+        //  before the deficit term adds the rest.
+        //
+        //  A purely deficit-driven rule cannot colour a steady pad at all: a
+        //  sustained tone sitting at its own reference has no deficit, so the
+        //  lift measured 0.26 dB against a 2 dB target. But "drive the body
+        //  harder" is the control's whole promise, and a pad IS body. So BODY
+        //  is a baseline on everything that is not a transient, plus more where
+        //  the signal has actually fallen away.
+        static constexpr float bodyBaseline = 0.55f;
+
+        //  12 dB, not 18. Measured on a decaying bass note, an 18 dB window
+        //  only reached a third of full depth through the musically useful part
+        //  of the decay, and the lift came out at 1.3 dB against a 2 dB target.
+        //  A saturator also gives back less than it is fed, so the pre-gain
+        //  window has to close sooner than the output target suggests.
+        static constexpr float bodyRangeDb = 12.0f;
+
+        //  Absolute floor. Below this the lift is faded out entirely, whatever
+        //  the relative deficit says - this is what stops BODY raising a noise
+        //  floor or a room tone in a gap. -60 dBFS, faded smoothly over the
+        //  12 dB above it rather than switched, because a hard gate on a gain
+        //  path is a click.
+        //  -45 dBFS, faded over the 15 dB above it. -60 was too low: the tail
+        //  of a bass note spends a long time between -60 and -48 dBFS, and the
+        //  lift was still partly open down there. Anything below -45 dBFS is a
+        //  tail or a room, not body worth colouring.
+        static constexpr float bodyFloorDb = -45.0f;
+        static constexpr float bodyFadeDb = 15.0f;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BehaviorDetector)
     };
 }
 
 
-===== FILE: Source/Dsp/Crossover.cpp =====
+===== FILE: Source/Dsp/BehaviorDetector.cpp =====
 
-#include "Crossover.h"
+#include "BehaviorDetector.h"
 
 namespace fourcolor
 {
     namespace
     {
-        constexpr float butterworthK = 1.41421356f;   // 1/Q for a Butterworth section
+        inline float onePoleCoeff (double sampleRate, float seconds) noexcept
+        {
+            return 1.0f - std::exp (-1.0f / (seconds * (float) sampleRate));
+        }
     }
 
-    void Crossover::prepare (double newSampleRate, int, int channelCount)
+    void BehaviorDetector::prepare (double sampleRate, int bandIndex)
     {
-        sampleRate  = newSampleRate;
-        numChannels = juce::jlimit (1, 2, channelCount);
+        //  Per-band detector clocks. LOW must be slow enough not to track the
+        //  waveform of a 40 Hz fundamental (25 ms period); HIGH can be fast.
+        //                              LOW    LMID   HMID   HIGH
+        constexpr float fastAtkMs[] = { 6.0f,  3.0f,  1.5f,  0.8f };
+        constexpr float fastRelMs[] = { 60.0f, 40.0f, 25.0f, 18.0f };
+        constexpr float slowAtkMs[] = { 80.0f, 60.0f, 45.0f, 35.0f };
+        constexpr float slowRelMs[] = { 200.0f, 150.0f, 120.0f, 100.0f };
 
-        //  ~15 ms smoothing time constant, applied once per control tick.
-        const float tickRate = (float) sampleRate / (float) controlInterval;
-        smoothCoeff = 1.0f - std::exp (-1.0f / (0.015f * tickRate));
+        const int b = juce::jlimit (0, 3, bandIndex);
+        fastAtk = onePoleCoeff (sampleRate, fastAtkMs[b] * 0.001f);
+        fastRel = onePoleCoeff (sampleRate, fastRelMs[b] * 0.001f);
+        slowAtk = onePoleCoeff (sampleRate, slowAtkMs[b] * 0.001f);
+        slowRel = onePoleCoeff (sampleRate, slowRelMs[b] * 0.001f);
+
+        //  Modulation smoothing: ~3 ms, fast enough to catch a transient's
+        //  head, slow enough to be click-free.
+        modSmooth = onePoleCoeff (sampleRate, 0.003f);
+
+        //  BODY's reference envelope: rises with the material, falls slowly
+        //  enough to survive a whole decay. Falling fast would make the
+        //  reference chase the decay downwards and the deficit would never
+        //  open - BODY would do nothing on exactly the material it exists for.
+        //                            LOW    LMID   HMID   HIGH
+        constexpr float refRiseMs[] = { 40.0f, 30.0f, 22.0f, 18.0f };
+        constexpr float refFallMs[] = { 1200.0f, 1000.0f, 800.0f, 700.0f };
+        referenceRise = onePoleCoeff (sampleRate, refRiseMs[b] * 0.001f);
+        referenceFall = onePoleCoeff (sampleRate, refFallMs[b] * 0.001f);
 
         reset();
     }
 
-    void Crossover::reset()
+    void BehaviorDetector::reset()
     {
-        for (auto& ch : channels)
-            ch.reset();
-
-        for (int i = 0; i < 3; ++i)
-            currentHz[i] = targetHz[i];
-
-        updateCoefficients();
+        fastEnv = slowEnv = referenceEnv = 0.0f;
+        modState = 1.0f;
     }
 
-    void Crossover::setFrequencies (float f1, float f2, float f3) noexcept
+    void BehaviorDetector::writeModulation (const juce::AudioBuffer<float>& bandInput,
+                                            float* modOut, int n) noexcept
     {
-        //  f2 is authoritative; push the outer cuts away if the user (or a
-        //  preset) tries to cross them.
-        f1 = juce::jmin (f1, f2 / minRatio);
-        f3 = juce::jmax (f3, f2 * minRatio);
+        const int chans = bandInput.getNumChannels();
+        const float* l = bandInput.getReadPointer (0);
+        const float* r = chans > 1 ? bandInput.getReadPointer (1) : nullptr;
 
-        targetHz[0] = f1;
-        targetHz[1] = f2;
-        targetHz[2] = f3;
-    }
+        //  The two sides are separate mechanisms, so they get separate depths.
+        const float attackAmount = juce::jmax (0.0f, amount);
+        const float bodyAmount   = juce::jmax (0.0f, -amount);
 
-    void Crossover::updateCoefficients() noexcept
-    {
-        const float g1 = dsp::svfG (sampleRate, currentHz[0]);
-        const float g2 = dsp::svfG (sampleRate, currentHz[1]);
-        const float g3 = dsp::svfG (sampleRate, currentHz[2]);
-
-        for (int c = 0; c < numChannels; ++c)
+        for (int i = 0; i < n; ++i)
         {
-            auto& ch = channels[c];
+            //  Stereo-linked rectifier: the louder channel drives both, so the
+            //  image never leans.
+            const float mag = r != nullptr ? juce::jmax (std::abs (l[i]), std::abs (r[i]))
+                                           : std::abs (l[i]);
 
-            ch.mid1.setCoefficients (g2, butterworthK);
-            ch.midLow2.setCoefficients (g2, butterworthK);
-            ch.midHigh2.setCoefficients (g2, butterworthK);
+            fastEnv += (mag > fastEnv ? fastAtk : fastRel) * (mag - fastEnv);
+            slowEnv += (mag > slowEnv ? slowAtk : slowRel) * (mag - slowEnv);
 
-            ch.low1.setCoefficients (g1, butterworthK);
-            ch.lowLow2.setCoefficients (g1, butterworthK);
-            ch.lowHigh2.setCoefficients (g1, butterworthK);
+            //  The reference BODY measures against: rises with the material,
+            //  falls slowly, so it holds the level of the recent passage.
+            referenceEnv += (mag > referenceEnv ? referenceRise : referenceFall)
+                          * (mag - referenceEnv);
 
-            ch.high1.setCoefficients (g3, butterworthK);
-            ch.highLow2.setCoefficients (g3, butterworthK);
-            ch.highHigh2.setCoefficients (g3, butterworthK);
+            //  Bounded transient measure: 0 in steady state, -> 1 when the fast
+            //  follower runs ahead of the slow one (i.e. on attacks).
+            const float transient = (fastEnv - slowEnv) / (fastEnv + slowEnv + 1.0e-6f);
+            const float t = juce::jlimit (0.0f, 1.0f, transient * 2.0f);
 
-            ch.apLowSide.setCoefficients (g3, butterworthK);
-            ch.apHighSide.setCoefficients (g1, butterworthK);
+            float targetDb = maxModDb * attackAmount * t;
 
-            ch.refAp1.setCoefficients (g1, butterworthK);
-            ch.refAp2.setCoefficients (g2, butterworthK);
-            ch.refAp3.setCoefficients (g3, butterworthK);
+            //  --- BODY ------------------------------------------------------
+            //  How far below its own recent reference the signal has fallen,
+            //  and therefore how much colour it is currently NOT getting.
+            if (bodyAmount > 1.0e-4f)
+            {
+                const float levelDb = juce::Decibels::gainToDecibels (slowEnv, -120.0f);
+                const float refDb   = juce::Decibels::gainToDecibels (referenceEnv, -120.0f);
+
+                const float deficitDb = juce::jlimit (0.0f, bodyRangeDb, refDb - levelDb);
+
+                //  Absolute floor, faded rather than gated: a hard gate on a
+                //  gain path is a click, and this path is a gain path.
+                const float protection =
+                    juce::jlimit (0.0f, 1.0f, (levelDb - bodyFloorDb) / bodyFadeDb);
+
+                //  The transient itself is deliberately excluded. BODY is not
+                //  allowed to make the hit louder - that is ATTACK's job, and
+                //  the brief asks for the initial attack window to stay put.
+                const float bodyOnly = 1.0f - t;
+
+                //  Baseline on all sustained material, plus the deficit term.
+                const float shape = bodyBaseline
+                                  + (1.0f - bodyBaseline) * (deficitDb / bodyRangeDb);
+
+                targetDb += maxBodyDb * bodyAmount * shape * protection * bodyOnly;
+            }
+
+            //  dB-linear modulation of the pre-gain, then one-pole smoothing.
+            //  At amount 0 both depths are 0, so the target is unity and
+            //  modState RELAXES to 1.0 through the same smoother instead of
+            //  snapping - which is what makes moving the control to zero
+            //  click-free.
+            const float target = std::exp (targetDb * 0.115129254f);   // ln(10)/20
+            modState += modSmooth * (target - modState);
+            modOut[i] = modState;
+        }
+    }
+}
+
+
+===== FILE: Source/Dsp/AutoLevel.h =====
+
+// Slow, bounded, internal loudness match between the wet chain's input and its
+// output. Not a compressor: the measurement window is long, the correction is
+// clamped to +/-12 dB, silence is ignored, and the gain moves over seconds.
+// It never writes to the visible Output parameter.
+//
+// The measurement is K-WEIGHTED, following the two-stage filter of ITU-R
+// BS.1770: a high shelf that stands in for the head's response, then a
+// high-pass that stops sub content counting for more than it is heard. Raw RMS
+// treated 40 Hz and 3 kHz as equally loud, which is exactly the mistake that
+// makes a saturator seem to change level when it has only changed spectrum.
+//
+// This is the weighting, not the whole standard: no 400 ms blocks, no gating,
+// no true-peak. It is a real-time matcher, and those parts of BS.1770 are for
+// measuring a finished master.
+
+#pragma once
+
+#include <juce_audio_basics/juce_audio_basics.h>
+
+namespace fourcolor
+{
+    class AutoLevel
+    {
+    public:
+        AutoLevel() = default;
+
+        void prepare (double sampleRate, int maxBlockSize);
+        void reset();
+
+        void setEnabled (bool shouldBeEnabled) noexcept { enabled = shouldBeEnabled; }
+
+        //  Call with the wet chain's input (post input trim, pre crossover).
+        void measureInput (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept;
+
+        //  Measures the pre-correction output, updates the slow gain, applies it.
+        void apply (juce::AudioBuffer<float>& buffer, int n, int chans) noexcept;
+
+        float getCurrentGain() const noexcept { return gain; }
+
+    private:
+        //  Direct-form-II transposed biquad. Two of these per channel make the
+        //  K weighting; they only ever see the measurement path, never audio.
+        struct Biquad
+        {
+            float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+            float z1 = 0.0f, z2 = 0.0f;
+
+            void reset() noexcept { z1 = z2 = 0.0f; }
+
+            float process (float x) noexcept
+            {
+                const float y = b0 * x + z1;
+                z1 = b1 * x - a1 * y + z2;
+                z2 = b2 * x - a2 * y;
+                return y;
+            }
+
+            void setHighShelf (double sampleRate, double freq, double q, double gainDb) noexcept;
+            void setHighPass (double sampleRate, double freq, double q) noexcept;
+        };
+
+        struct KWeighting
+        {
+            Biquad shelf, highPass;
+
+            void prepare (double sampleRate) noexcept;
+            void reset() noexcept { shelf.reset(); highPass.reset(); }
+            float process (float x) noexcept { return highPass.process (shelf.process (x)); }
+        };
+
+        double rate = 48000.0;
+        bool enabled = true;
+
+        float inPower = 0.0f, outPower = 0.0f;
+        float measureCoeff = 0.0f;    // ~500 ms power window
+        float gainCoeff = 0.0f;       // ~1.5 s correction glide
+        float gain = 1.0f;
+
+        KWeighting inFilters[2], outFilters[2];
+
+        //  BS.1770's relative gate, in miniature. Saturation raises quiet
+        //  passages more than loud ones, so on sparse material - a plucked
+        //  melody, a vocal with gaps - an ungated mean square weights the gaps
+        //  differently in the input and the output and the match comes out
+        //  wrong. Only samples the INPUT considers loud enough are counted, and
+        //  the same decision gates both accumulators so they stay aligned.
+        std::vector<juce::uint8> gateMask;
+        float fastInPower = 0.0f, loudReference = 0.0f;
+        float fastCoeff = 0.0f, referenceDecay = 0.0f;
+
+        //  -20 dB relative to the running loud reference.
+        static constexpr float relativeGate = 0.01f;
+
+        static constexpr float maxCorrection = 3.98f;      // +12 dB
+        static constexpr float minCorrection = 0.2512f;    // -12 dB
+
+        //  -60 dBFS of K-weighted power. Below it the gain is held, not chased.
+        static constexpr float silenceGate = 1.0e-6f;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AutoLevel)
+    };
+}
+
+
+===== FILE: Source/Dsp/AutoLevel.cpp =====
+
+#include "AutoLevel.h"
+
+namespace fourcolor
+{
+    //  RBJ cookbook forms, normalised by a0. BS.1770 tabulates its coefficients
+    //  at 48 kHz only; designing from the analogue prototype instead means the
+    //  weighting is the same curve at 44.1, 96 and 192 kHz rather than only
+    //  correct at one rate.
+    void AutoLevel::Biquad::setHighShelf (double sampleRate, double freq,
+                                          double q, double gainDb) noexcept
+    {
+        const double a = std::pow (10.0, gainDb / 40.0);
+        const double w0 = 2.0 * juce::MathConstants<double>::pi * freq / sampleRate;
+        const double cosw = std::cos (w0), sinw = std::sin (w0);
+        const double alpha = sinw / (2.0 * q);
+        const double twoSqrtAlpha = 2.0 * std::sqrt (a) * alpha;
+
+        const double a0 =        (a + 1.0) - (a - 1.0) * cosw + twoSqrtAlpha;
+        b0 = (float) ( a * ((a + 1.0) + (a - 1.0) * cosw + twoSqrtAlpha) / a0);
+        b1 = (float) (-2.0 * a * ((a - 1.0) + (a + 1.0) * cosw) / a0);
+        b2 = (float) ( a * ((a + 1.0) + (a - 1.0) * cosw - twoSqrtAlpha) / a0);
+        a1 = (float) ( 2.0 * ((a - 1.0) - (a + 1.0) * cosw) / a0);
+        a2 = (float) (      ((a + 1.0) - (a - 1.0) * cosw - twoSqrtAlpha) / a0);
+    }
+
+    void AutoLevel::Biquad::setHighPass (double sampleRate, double freq, double q) noexcept
+    {
+        const double w0 = 2.0 * juce::MathConstants<double>::pi * freq / sampleRate;
+        const double cosw = std::cos (w0), sinw = std::sin (w0);
+        const double alpha = sinw / (2.0 * q);
+
+        const double a0 = 1.0 + alpha;
+        b0 = (float) ( (1.0 + cosw) * 0.5 / a0);
+        b1 = (float) (-(1.0 + cosw) / a0);
+        b2 = (float) ( (1.0 + cosw) * 0.5 / a0);
+        a1 = (float) (-2.0 * cosw / a0);
+        a2 = (float) ( (1.0 - alpha) / a0);
+    }
+
+    void AutoLevel::KWeighting::prepare (double sampleRate) noexcept
+    {
+        //  The two BS.1770 stages, by their published parameters.
+        shelf.setHighShelf (sampleRate, 1681.97, 0.7071752, 3.99984);
+        highPass.setHighPass (sampleRate, 38.13547, 0.5003271);
+        reset();
+    }
+
+    void AutoLevel::prepare (double sampleRate, int maxBlockSize)
+    {
+        rate = sampleRate;
+        measureCoeff = 1.0f - std::exp (-1.0f / (0.5f * (float) sampleRate));
+        gainCoeff    = 1.0f - std::exp (-1.0f / (1.5f * (float) sampleRate));
+
+        //  ~20 ms envelope for the gate decision, and a reference that falls
+        //  slowly enough to survive a bar of quiet material.
+        fastCoeff      = 1.0f - std::exp (-1.0f / (0.020f * (float) sampleRate));
+        referenceDecay = 1.0f - std::exp (-1.0f / (3.0f * (float) sampleRate));
+
+        gateMask.assign ((size_t) juce::jmax (1, maxBlockSize), 1);
+
+        for (auto& f : inFilters)  f.prepare (sampleRate);
+        for (auto& f : outFilters) f.prepare (sampleRate);
+
+        reset();
+    }
+
+    void AutoLevel::reset()
+    {
+        inPower = outPower = 0.0f;
+        fastInPower = loudReference = 0.0f;
+        gain = 1.0f;
+
+        for (auto& f : inFilters)  f.reset();
+        for (auto& f : outFilters) f.reset();
+    }
+
+    void AutoLevel::measureInput (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
+    {
+        const float* d[2] = { buffer.getReadPointer (0),
+                              chans > 1 ? buffer.getReadPointer (1) : nullptr };
+        const int used = d[1] != nullptr ? 2 : 1;
+
+        for (int i = 0; i < n; ++i)
+        {
+            float p = 0.0f;
+            for (int c = 0; c < used; ++c)
+            {
+                const float weighted = inFilters[c].process (d[c][i]);
+                p += weighted * weighted;
+            }
+            p /= (float) used;
+
+            //  Track a fast envelope and a slowly falling reference for the
+            //  loudest recent material, then decide whether this sample counts.
+            fastInPower += fastCoeff * (p - fastInPower);
+            loudReference = juce::jmax (fastInPower,
+                                        loudReference - referenceDecay * loudReference);
+
+            const bool counts = fastInPower > loudReference * relativeGate;
+            if (i < (int) gateMask.size())
+                gateMask[(size_t) i] = counts ? 1 : 0;
+
+            if (counts)
+                inPower += measureCoeff * (p - inPower);
         }
     }
 
-    void Crossover::process (const juce::AudioBuffer<float>& input,
-                             juce::AudioBuffer<float>* bands,
-                             juce::AudioBuffer<float>* allpassRef) noexcept
+    void AutoLevel::apply (juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
     {
-        const int numSamples = input.getNumSamples();
-        const int chans      = juce::jmin (input.getNumChannels(), numChannels);
+        float* d[2] = { buffer.getWritePointer (0),
+                        chans > 1 ? buffer.getWritePointer (1) : nullptr };
+        const int used = d[1] != nullptr ? 2 : 1;
 
-        for (int start = 0; start < numSamples; start += controlInterval)
+        for (int i = 0; i < n; ++i)
         {
-            const int end = juce::jmin (start + controlInterval, numSamples);
-
-            //  Smooth the cutoffs once per control tick.
-            bool moved = false;
-            for (int i = 0; i < 3; ++i)
+            float p = 0.0f;
+            for (int c = 0; c < used; ++c)
             {
-                const float delta = targetHz[i] - currentHz[i];
-                if (std::abs (delta) > 1.0e-3f)
-                {
-                    currentHz[i] += smoothCoeff * delta;
-                    moved = true;
-                }
+                const float weighted = outFilters[c].process (d[c][i]);
+                p += weighted * weighted;
             }
-            if (moved)
-                updateCoefficients();
+            p /= (float) used;
 
-            for (int c = 0; c < chans; ++c)
-            {
-                auto& ch      = channels[c];
-                auto* in      = input.getReadPointer (c);
-                auto* b0      = bands[0].getWritePointer (c);
-                auto* b1      = bands[1].getWritePointer (c);
-                auto* b2      = bands[2].getWritePointer (c);
-                auto* b3      = bands[3].getWritePointer (c);
-                auto* ref     = allpassRef != nullptr ? allpassRef->getWritePointer (c) : nullptr;
+            //  Gated by the INPUT's decision, taken in measureInput this block.
+            const bool counts = i >= (int) gateMask.size() || gateMask[(size_t) i] != 0;
+            if (counts)
+                outPower += measureCoeff * (p - outPower);
 
-                for (int i = start; i < end; ++i)
-                {
-                    const float x = in[i];
+            //  Above the silence gate, glide towards the bounded correction;
+            //  in silence, hold (never chase noise floors).
+            float target = gain;
+            if (! enabled)
+                target = 1.0f;
+            else if (inPower > silenceGate && outPower > silenceGate)
+                target = juce::jlimit (minCorrection, maxCorrection,
+                                       std::sqrt (inPower / outPower));
 
-                    //  Split at f2. The first LR4 stage is shared: one SVF
-                    //  yields both the LP2 and HP2 of the same input.
-                    const auto m1  = ch.mid1.process (x);
-                    float lowHalf  = ch.midLow2.processLow (m1.low);
-                    float highHalf = ch.midHigh2.processHigh (m1.high);
+            gain += gainCoeff * (target - gain);
 
-                    //  Sibling allpass compensation (see ARCHITECTURE.md).
-                    lowHalf  = ch.apLowSide.processAllpass (lowHalf);
-                    highHalf = ch.apHighSide.processAllpass (highHalf);
-
-                    //  Split the low half at f1.
-                    const auto l1 = ch.low1.process (lowHalf);
-                    b0[i] = ch.lowLow2.processLow (l1.low);
-                    b1[i] = ch.lowHigh2.processHigh (l1.high);
-
-                    //  Split the high half at f3.
-                    const auto h1 = ch.high1.process (highHalf);
-                    b2[i] = ch.highLow2.processLow (h1.low);
-                    b3[i] = ch.highHigh2.processHigh (h1.high);
-
-                    if (ref != nullptr)
-                        ref[i] = ch.refAp3.processAllpass (
-                                     ch.refAp2.processAllpass (
-                                         ch.refAp1.processAllpass (x)));
-                }
-            }
+            for (int c = 0; c < used; ++c)
+                d[c][i] *= gain;
         }
     }
 }
@@ -454,6 +617,27 @@ namespace fourcolor
 
 namespace fourcolor
 {
+    //  Where a colour engine is sitting in the spectrum.
+    //
+    //  This is internal state, not a parameter: nothing here is automatable,
+    //  nothing is stored in a preset, and no Parameter ID exists for any of it.
+    //  It is the answer to a question the engines could not previously ask -
+    //  "what frequencies am I actually being asked to distort?" - which is why
+    //  a diode pair tuned around 1800 Hz did almost nothing inside a 20-120 Hz
+    //  band, and why a gate tuned for a snare chattered on a 30 Hz decay.
+    //
+    //  It changes whenever a crossover moves, which means anything derived from
+    //  it must be smoothed or rate-limited: a coefficient that jumps with the
+    //  block is a click on a crossover automation ramp.
+    struct ColorContext
+    {
+        int bandIndex = 0;
+        double oversampledRate = 48000.0;
+        float bandLowHz = 20.0f;
+        float bandHighHz = 16000.0f;
+        float centreHz = 500.0f;
+    };
+
     class ColorEngine
     {
     public:
@@ -464,6 +648,14 @@ namespace fourcolor
 
         //  drivePercent 0..100. Cheap; called once per block.
         void setDrive (float drivePercent) noexcept;
+
+        //  Where this engine sits in the spectrum. Called at block rate, and
+        //  NEVER resets internal state: a crossover move must not silence a
+        //  feedback loop or empty a sag envelope. Engines that derive
+        //  coefficients from it do so through contextChanged().
+        void setContext (const ColorContext& c) noexcept;
+
+        const ColorContext& getContext() const noexcept { return context; }
 
         //  Per-band Behavior modulation multiplies the effective pre-gain.
         //  1.0 = neutral; bounded to about +/-6 dB by the caller.
@@ -500,12 +692,19 @@ namespace fourcolor
         virtual void resetInternals() = 0;
         virtual void driveChanged() noexcept {}
 
+        //  Recompute anything derived from the band's frequency range. Called
+        //  only when the context has actually moved by an audible amount, so an
+        //  engine may do real work here - but it must not reset state.
+        virtual void contextChanged() noexcept {}
+
         //  The engine's memoryless transfer approximation, used only to compute
         //  static gain compensation.
         virtual float staticShape (float u) const noexcept = 0;
 
         //  Maximum pre-gain in dB at drive = 100.
         virtual float maxDriveDb() const noexcept = 0;
+
+        ColorContext context;
 
         double rate = 48000.0;
         int channelCount = 2;
@@ -554,10 +753,17 @@ namespace fourcolor
         void prepareInternals() override;
         void resetInternals() override;
         void driveChanged() noexcept override;
+        void contextChanged() noexcept override;
         float staticShape (float u) const noexcept override;
         float maxDriveDb() const noexcept override { return 27.0f; }
 
     private:
+        //  The core-loss corner follows the band. A fixed 280 Hz was the centre
+        //  of the LOW MID band and nothing else: inside a 20-120 Hz band it
+        //  passes the whole signal, so the loop returned everything and IRON had
+        //  no density down there at all.
+        void updateCoreLoss() noexcept;
+
         float fbAmount = 0.0f, evenAmount = 0.0f;
         struct Ch { dsp::OnePole coreLoss; float lastOut = 0.0f; dsp::DcBlocker dc; } ch[maxChannels];
     };
@@ -573,10 +779,16 @@ namespace fourcolor
         void prepareInternals() override;
         void resetInternals() override;
         void driveChanged() noexcept override;
+        void contextChanged() noexcept override;
         float staticShape (float u) const noexcept override;
         float maxDriveDb() const noexcept override { return 30.0f; }
 
     private:
+        //  Same story: 1800 Hz was the HIGH MID centre. In the low band a
+        //  1800 Hz high-pass passes almost nothing, so BITE's defining
+        //  pre-emphasis did nothing there and it collapsed to a bare diode.
+        void updateEmphasisFilters() noexcept;
+
         float emphasis = 0.6f;
         struct Ch { dsp::OnePole preHp, postHp; dsp::DcBlocker dc; } ch[maxChannels];
     };
@@ -592,10 +804,17 @@ namespace fourcolor
         void prepareInternals() override;
         void resetInternals() override;
         void driveChanged() noexcept override;
+        void contextChanged() noexcept override;
         float staticShape (float u) const noexcept override;
         float maxDriveDb() const noexcept override { return 36.0f; }
 
     private:
+        //  The gate's clock follows the band. 0.5 ms is right for a snare and
+        //  wrong for a 30 Hz decay, where an envelope that fast rides the
+        //  waveform and the gate opens and shuts twice per cycle - buzz, not
+        //  sputter.
+        void updateGateTimes() noexcept;
+
         float rectify = 0.0f, gateThreshold = 0.002f;
         float envAttack = 0.0f, envRelease = 0.0f;
         struct Ch { float env = 0.0f; dsp::DcBlocker dc; } ch[maxChannels];
@@ -630,6 +849,33 @@ namespace fourcolor
     {
         engageSmoothed.setCurrentAndTargetValue (engageTarget);
         resetInternals();
+    }
+
+    void ColorEngine::setContext (const ColorContext& c) noexcept
+    {
+        //  Only act on a real move. setSettings runs every block, and the
+        //  crossover smoother delivers a slightly different number every one of
+        //  them; recomputing filter coefficients at block rate off a
+        //  continuously drifting value is how a crossover ramp turns into a
+        //  zipper. A twentieth of a semitone is below anything audible in a
+        //  band edge and far above the smoother's per-block step.
+        const auto moved = [] (float a, float b)
+        {
+            return ! (a > 0.0f && b > 0.0f) || std::abs (std::log (a / b)) > 0.003f;
+        };
+
+        const bool changed = context.bandIndex != c.bandIndex
+                          || std::abs (context.oversampledRate - c.oversampledRate) > 1.0e-6
+                          || moved (context.bandLowHz,  c.bandLowHz)
+                          || moved (context.bandHighHz, c.bandHighHz)
+                          || moved (context.centreHz,   c.centreHz);
+
+        context = c;
+
+        //  Never a reset. A band edge moving is not a reason to empty a
+        //  feedback loop, a sag envelope or a DC blocker.
+        if (changed)
+            contextChanged();
     }
 
     void ColorEngine::setDrive (float drivePercent) noexcept
@@ -751,13 +997,28 @@ namespace fourcolor
     }
 
     // --- IRON -----------------------------------------------------------------
+    void IronEngine::updateCoreLoss() noexcept
+    {
+        //  The loop must return only the BOTTOM of whatever band it is in - that
+        //  is what makes the density read as weight rather than as mud. The old
+        //  fixed 280 Hz happened to be the LOW MID band's centre; using the
+        //  centre generalises it and leaves that band where it was.
+        const float corner = juce::jlimit (20.0f, (float) rate * 0.2f, context.centreHz);
+        for (auto& c : ch)
+            c.coreLoss.setCutoff (rate, corner);
+    }
+
     void IronEngine::prepareInternals()
     {
         for (auto& c : ch)
-        {
-            c.coreLoss.setCutoff (rate, 280.0f);   // the loop returns only lows: density
             c.dc.prepare (rate);
-        }
+
+        updateCoreLoss();
+    }
+
+    void IronEngine::contextChanged() noexcept
+    {
+        updateCoreLoss();
     }
 
     void IronEngine::resetInternals()
@@ -800,14 +1061,30 @@ namespace fourcolor
     }
 
     // --- BITE -----------------------------------------------------------------
+    void BiteEngine::updateEmphasisFilters() noexcept
+    {
+        //  Pre-emphasis has to push the TOP OF THIS BAND into the clipper. The
+        //  old fixed 1800 Hz was the HIGH MID centre; in the low band it passed
+        //  almost nothing and BITE lost the mechanism that defines it.
+        const float corner = juce::jlimit (20.0f, (float) rate * 0.2f, context.centreHz);
+        for (auto& c : ch)
+        {
+            c.preHp.setCutoff (rate, corner);
+            c.postHp.setCutoff (rate, corner);
+        }
+    }
+
     void BiteEngine::prepareInternals()
     {
         for (auto& c : ch)
-        {
-            c.preHp.setCutoff (rate, 1800.0f);
-            c.postHp.setCutoff (rate, 1800.0f);
             c.dc.prepare (rate);
-        }
+
+        updateEmphasisFilters();
+    }
+
+    void BiteEngine::contextChanged() noexcept
+    {
+        updateEmphasisFilters();
     }
 
     void BiteEngine::resetInternals()
@@ -862,14 +1139,32 @@ namespace fourcolor
     }
 
     // --- FUZZ -----------------------------------------------------------------
+    void FuzzEngine::updateGateTimes() noexcept
+    {
+        //  Half a period of the band centre, so the envelope reads the band's
+        //  LEVEL instead of riding its waveform. In the HIGH MID band that lands
+        //  near the 0.5 ms this used to be fixed at; in the LOW band it opens
+        //  out to about 10 ms, which is the difference between a sputter and a
+        //  buzz on a 30 Hz decay.
+        const float centre = juce::jlimit (20.0f, 20000.0f, context.centreHz);
+        const float attackMs  = juce::jlimit (0.3f, 12.0f, 500.0f / centre);
+        const float releaseMs = juce::jlimit (30.0f, 150.0f, 12000.0f / centre);
+
+        envAttack  = 1.0f - std::exp (-1.0f / (attackMs  * 0.001f * (float) rate));
+        envRelease = 1.0f - std::exp (-1.0f / (releaseMs * 0.001f * (float) rate));
+    }
+
     void FuzzEngine::prepareInternals()
     {
-        //  Fast gate envelope: ~0.5 ms attack, ~30 ms release.
-        envAttack  = 1.0f - std::exp (-1.0f / (0.0005f * (float) rate));
-        envRelease = 1.0f - std::exp (-1.0f / (0.030f * (float) rate));
-
         for (auto& c : ch)
             c.dc.prepare (rate);
+
+        updateGateTimes();
+    }
+
+    void FuzzEngine::contextChanged() noexcept
+    {
+        updateGateTimes();
     }
 
     void FuzzEngine::resetInternals()
@@ -991,6 +1286,11 @@ namespace fourcolor
 
         void setDrive (float drivePercent) noexcept;
 
+        //  Where this band sits in the spectrum. The stage owns the only thing
+        //  the caller cannot know - which oversampling factor each engine bank
+        //  is currently running at - so it fills that field in itself.
+        void setContext (const ColorContext& c) noexcept;
+
         //  In-place. `behaviorMod`, if given, is a base-rate per-sample linear
         //  gain factor (around 1.0) applied to the engine pre-gain.
         void process (juce::AudioBuffer<float>& buffer,
@@ -1018,6 +1318,12 @@ namespace fourcolor
         }
 
         ColorType getColor() const noexcept { return activeColor; }
+
+        //  The engine currently producing audio. Diagnostics and tests only.
+        const ColorEngine& getActiveEngine() const noexcept
+        {
+            return *engines[activeBank][(size_t) activeColor];
+        }
         bool isSwitchingQuality() const noexcept { return qualityFadeLeft > 0; }
 
     private:
@@ -1068,6 +1374,7 @@ namespace fourcolor
         juce::AudioBuffer<float> modScratch;       // oversampled behavior modulation
         juce::AudioBuffer<float> qualityScratch;   // base-rate copy, outgoing quality
         float drivePercent = 25.0f;
+        ColorContext bandContext;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NonlinearStage)
     };
@@ -1156,10 +1463,14 @@ namespace fourcolor
         const double engineRate = baseRate
                                 * (double) oversamplers[qualityIndex]->getOversamplingFactor();
 
+        auto ctx = bandContext;
+        ctx.oversampledRate = engineRate;
+
         for (auto& e : engines[bankIndex])
         {
             e->prepare (engineRate, channels);
             e->setDrive (drivePercent);
+            e->setContext (ctx);
         }
 
         //  In the oversampled domain the pad is exact: the oversampler's own
@@ -1233,6 +1544,28 @@ namespace fourcolor
 
         for (auto& bank : engines)
             bank[(size_t) activeColor]->setDrive (drivePercent);
+    }
+
+    void NonlinearStage::setContext (const ColorContext& c) noexcept
+    {
+        bandContext = c;
+
+        //  Both banks: during a quality crossfade the outgoing one is still
+        //  producing audio, and a band edge that reached only one of them would
+        //  make the two paths disagree in the middle of the fade.
+        for (int bank = 0; bank < 2; ++bank)
+        {
+            const int q = bank == activeBank ? activeQuality : outgoingQuality;
+
+            if (oversamplers[q] == nullptr)
+                continue;
+
+            auto ctx = c;
+            ctx.oversampledRate = baseRate * (double) oversamplers[q]->getOversamplingFactor();
+
+            for (auto& e : engines[bank])
+                e->setContext (ctx);
+        }
     }
 
     void NonlinearStage::setDrive (float newDrivePercent) noexcept
@@ -1429,276 +1762,6 @@ namespace fourcolor
 }
 
 
-===== FILE: Source/Dsp/BehaviorDetector.h =====
-
-// The BODY <-> ATTACK detector. Two envelope followers on the same stereo-
-// linked signal - one fast, one slow - and a bounded transient measure derived
-// from their difference. The measure modulates the colour engine's pre-gain:
-//
-//   ATTACK (+): transients are driven HARDER   (hit gets bite, tail stays calm)
-//   BODY   (-): transients are driven SOFTER   (hit passes clean, body saturates)
-//
-// Time constants scale per band: a "fast" 1 ms follower on a 40 Hz band would
-// just track the waveform, so the low bands use slower clocks than the top.
-// Modulation depth is bounded to +/-6 dB and smoothed, which is what keeps
-// this from becoming a pumping compressor.
-
-#pragma once
-
-#include <juce_audio_basics/juce_audio_basics.h>
-
-#include "../Core/ParameterIds.h"
-
-namespace fourcolor
-{
-    class BehaviorDetector
-    {
-    public:
-        BehaviorDetector() = default;
-
-        void prepare (double sampleRate, int bandIndex);
-        void reset();
-
-        //  behavior in [-1, 1]; 0 disables (writeModulation then writes 1.0).
-        void setBehavior (float behavior) noexcept { amount = juce::jlimit (-1.0f, 1.0f, behavior); }
-
-        //  Reads the (pre-processing) band buffer, writes a per-sample linear
-        //  pre-gain factor into `modOut` (length n). Stereo-linked: one curve
-        //  for both channels.
-        void writeModulation (const juce::AudioBuffer<float>& bandInput,
-                              float* modOut, int n) noexcept;
-
-        bool isActive() const noexcept { return std::abs (amount) > 1.0e-3f; }
-
-    private:
-        float amount = 0.0f;
-
-        //  One-pole coefficients (attack/release pairs) for the two followers
-        //  and the modulation smoother.
-        float fastAtk = 0.0f, fastRel = 0.0f;
-        float slowAtk = 0.0f, slowRel = 0.0f;
-        float modSmooth = 0.0f;
-
-        float fastEnv = 0.0f, slowEnv = 0.0f, modState = 1.0f;
-
-        //  +/-9 dB at full deflection: +/-6 dB was measured to move the kick's
-        //  attack-crunch spread only 1.3 dB, too subtle for the product's
-        //  headline control. Pumping stays bounded (asserted at < 1 dB on
-        //  sustained material).
-        static constexpr float maxModDb = 9.0f;
-
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BehaviorDetector)
-    };
-}
-
-
-===== FILE: Source/Dsp/BehaviorDetector.cpp =====
-
-#include "BehaviorDetector.h"
-
-namespace fourcolor
-{
-    namespace
-    {
-        inline float onePoleCoeff (double sampleRate, float seconds) noexcept
-        {
-            return 1.0f - std::exp (-1.0f / (seconds * (float) sampleRate));
-        }
-    }
-
-    void BehaviorDetector::prepare (double sampleRate, int bandIndex)
-    {
-        //  Per-band detector clocks. LOW must be slow enough not to track the
-        //  waveform of a 40 Hz fundamental (25 ms period); HIGH can be fast.
-        //                              LOW    LMID   HMID   HIGH
-        constexpr float fastAtkMs[] = { 6.0f,  3.0f,  1.5f,  0.8f };
-        constexpr float fastRelMs[] = { 60.0f, 40.0f, 25.0f, 18.0f };
-        constexpr float slowAtkMs[] = { 80.0f, 60.0f, 45.0f, 35.0f };
-        constexpr float slowRelMs[] = { 200.0f, 150.0f, 120.0f, 100.0f };
-
-        const int b = juce::jlimit (0, 3, bandIndex);
-        fastAtk = onePoleCoeff (sampleRate, fastAtkMs[b] * 0.001f);
-        fastRel = onePoleCoeff (sampleRate, fastRelMs[b] * 0.001f);
-        slowAtk = onePoleCoeff (sampleRate, slowAtkMs[b] * 0.001f);
-        slowRel = onePoleCoeff (sampleRate, slowRelMs[b] * 0.001f);
-
-        //  Modulation smoothing: ~3 ms, fast enough to catch a transient's
-        //  head, slow enough to be click-free.
-        modSmooth = onePoleCoeff (sampleRate, 0.003f);
-
-        reset();
-    }
-
-    void BehaviorDetector::reset()
-    {
-        fastEnv = slowEnv = 0.0f;
-        modState = 1.0f;
-    }
-
-    void BehaviorDetector::writeModulation (const juce::AudioBuffer<float>& bandInput,
-                                            float* modOut, int n) noexcept
-    {
-        if (! isActive())
-        {
-            juce::FloatVectorOperations::fill (modOut, 1.0f, n);
-            modState = 1.0f;
-            return;
-        }
-
-        const int chans = bandInput.getNumChannels();
-        const float* l = bandInput.getReadPointer (0);
-        const float* r = chans > 1 ? bandInput.getReadPointer (1) : nullptr;
-
-        //  +/-6 dB at full transient measure and full amount.
-        const float depthDb = maxModDb * amount;
-
-        for (int i = 0; i < n; ++i)
-        {
-            //  Stereo-linked rectifier: the louder channel drives both, so the
-            //  image never leans.
-            const float mag = r != nullptr ? juce::jmax (std::abs (l[i]), std::abs (r[i]))
-                                           : std::abs (l[i]);
-
-            fastEnv += (mag > fastEnv ? fastAtk : fastRel) * (mag - fastEnv);
-            slowEnv += (mag > slowEnv ? slowAtk : slowRel) * (mag - slowEnv);
-
-            //  Bounded transient measure: 0 in steady state, -> 1 when the fast
-            //  follower runs ahead of the slow one (i.e. on attacks).
-            const float transient = (fastEnv - slowEnv) / (fastEnv + slowEnv + 1.0e-6f);
-            const float t = juce::jlimit (0.0f, 1.0f, transient * 2.0f);
-
-            //  dB-linear modulation of the pre-gain, then one-pole smoothing.
-            const float targetDb = depthDb * t;
-            const float target = std::exp (targetDb * 0.115129254f);   // ln(10)/20
-            modState += modSmooth * (target - modState);
-            modOut[i] = modState;
-        }
-    }
-}
-
-
-===== FILE: Source/Dsp/ToneStage.h =====
-
-// Per-band DARK <-> BRIGHT control. Not a post-EQ: the tilt is split equally
-// between a pre-emphasis half (which changes WHAT the shaper distorts) and a
-// post half (which finishes the tonal move and reins in harsh top on high
-// drive). Total reach is +/-9 dB of high-shelf at the band's centre, so a
-// band's tone cannot dump energy far outside its own region.
-
-#pragma once
-
-#include <juce_audio_basics/juce_audio_basics.h>
-
-#include "TptFilters.h"
-
-namespace fourcolor
-{
-    class ToneStage
-    {
-    public:
-        ToneStage() = default;
-
-        void prepare (double sampleRate, int numChannels);
-        void reset();
-
-        //  tone in [-1, 1], centreHz = the band's geometric centre. Cheap.
-        void setTone (float tone, float centreHz) noexcept;
-
-        void processPre  (juce::AudioBuffer<float>& buffer) noexcept;
-        void processPost (juce::AudioBuffer<float>& buffer) noexcept;
-
-    private:
-        void apply (juce::AudioBuffer<float>& buffer, dsp::OnePole* filters, float amount) noexcept;
-
-        double rate = 48000.0;
-        int channels = 2;
-        float amountPre = 0.0f, amountPost = 0.0f;
-        float currentCentre = 0.0f;
-
-        dsp::OnePole preHp[2], postHp[2];
-
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ToneStage)
-    };
-}
-
-
-===== FILE: Source/Dsp/ToneStage.cpp =====
-
-#include "ToneStage.h"
-
-namespace fourcolor
-{
-    void ToneStage::prepare (double sampleRate, int numChannels)
-    {
-        rate = sampleRate;
-        channels = juce::jlimit (1, 2, numChannels);
-        currentCentre = 0.0f;
-        reset();
-    }
-
-    void ToneStage::reset()
-    {
-        for (int c = 0; c < 2; ++c)
-        {
-            preHp[c].reset();
-            postHp[c].reset();
-        }
-    }
-
-    void ToneStage::setTone (float tone, float centreHz) noexcept
-    {
-        tone = juce::jlimit (-1.0f, 1.0f, tone);
-
-        //  +/-9 dB net tilt, split as two equal sqrt halves around the shaper.
-        const float netGain  = std::pow (10.0f, tone * 9.0f / 20.0f);
-        const float half     = std::sqrt (netGain) - 1.0f;
-
-        amountPre  = half;
-        amountPost = half;
-
-        //  Retune the shelf corner only when the centre actually moves
-        //  (crossover automation); a 5% threshold avoids per-block tan().
-        if (std::abs (centreHz - currentCentre) > 0.05f * juce::jmax (1.0f, currentCentre))
-        {
-            currentCentre = centreHz;
-            for (int c = 0; c < 2; ++c)
-            {
-                preHp[c].setCutoff (rate, centreHz);
-                postHp[c].setCutoff (rate, centreHz);
-            }
-        }
-    }
-
-    void ToneStage::apply (juce::AudioBuffer<float>& buffer, dsp::OnePole* filters, float amount) noexcept
-    {
-        //  y = x + amount * highpass(x): a first-order high shelf of gain
-        //  (1 + amount) above the corner.
-        const int n = buffer.getNumSamples();
-
-        for (int c = 0; c < juce::jmin (buffer.getNumChannels(), channels); ++c)
-        {
-            auto* d = buffer.getWritePointer (c);
-            auto& f = filters[c];
-
-            for (int i = 0; i < n; ++i)
-                d[i] += amount * f.processHigh (d[i]);
-        }
-    }
-
-    void ToneStage::processPre (juce::AudioBuffer<float>& buffer) noexcept
-    {
-        //  The filter must keep running even at amount 0 so engaging the tone
-        //  is stateless-transition free.
-        apply (buffer, preHp, amountPre);
-    }
-
-    void ToneStage::processPost (juce::AudioBuffer<float>& buffer) noexcept
-    {
-        apply (buffer, postHp, amountPost);
-    }
-}
-
-
 ===== FILE: Source/Dsp/HarmonicSpace.h =====
 
 // HARMONIC SPACE - not a reverb. The engine isolates what the saturation
@@ -1719,7 +1782,12 @@ namespace fourcolor
 // HIGH sits tight at 3-7 ms. The LOW band's diffusion is strictly mono;
 // the other bands decorrelate L/R by detuned delay lengths.
 //
-// At amount 0 the whole engine is skipped by the caller (isActive()).
+// The fit KEEPS RUNNING while Space is at 0. It used to be skipped with the
+// rest of the engine, which meant turning Space up started the estimator from
+// nothing: for the first ~200 ms of its 200 ms accumulator the coefficients
+// were wrong, and a large slice of the CLEAN source was diffused as if the
+// saturation had made it. Only the diffuser is skipped at 0 now - that is where
+// the cost is - so the estimator is always converged by the time it is needed.
 
 #pragma once
 
@@ -1739,7 +1807,17 @@ namespace fourcolor
         void reset();
 
         void setAmount (float amount01) noexcept;
-        bool isActive() const noexcept { return targetAmount > 1.0e-3f || currentAmount > 1.0e-3f; }
+
+        //  True when the DIFFUSER has work to do. The estimator runs regardless;
+        //  process() must be called on every block whatever this returns.
+        bool isDiffusing() const noexcept
+        {
+            return targetAmount > 1.0e-3f || currentAmount > 1.0e-3f;
+        }
+
+        //  Diagnostics for the tests: the smoothed linear-fit coefficients.
+        float getFitGain (int channel) const noexcept { return fit[channel & 1].g0; }
+        float getFitHpGain (int channel) const noexcept { return fit[channel & 1].g1; }
 
         //  Reads the processed band (`wet`) and the aligned clean band, ADDS
         //  the diffused residual into `wet` in place.
@@ -1769,9 +1847,19 @@ namespace fourcolor
         //  Running two-basis least-squares accumulators, per channel:
         //  s00 = <c,c>, s11 = <h,h>, s01 = <c,h>, r0 = <w,c>, r1 = <w,h>
         //  with c = clean, h = HP(clean), w = wet.
-        struct FitState { float s00 = 0, s11 = 0, s01 = 0, r0 = 0, r1 = 0; };
+        struct FitState
+        {
+            float s00 = 0, s11 = 0, s01 = 0, r0 = 0, r1 = 0;
+
+            //  Smoothed solution. g0 starts at 1 because "the wet band is the
+            //  clean band" is the correct guess before any audio has been seen;
+            //  starting at 0 made the first residual the entire wet signal.
+            float g0 = 1.0f, g1 = 0.0f;
+        };
         FitState fit[2];
         float accCoeff = 0.0f;
+        float coefCoeff = 0.0f;
+        bool diffuserPrimed = false;
 
         dsp::OnePole basisHp[2];      // the high-pass basis filter
         dsp::DcBlocker residualHp[2];
@@ -1874,6 +1962,10 @@ namespace fourcolor
         accCoeff    = 1.0f - std::exp (-1.0f / (0.2f  * (float) sampleRate));
         amountCoeff = 1.0f - std::exp (-1.0f / (0.03f * (float) sampleRate));
 
+        //  The coefficients themselves are smoothed on top of the accumulator,
+        //  so a gate slamming shut cannot step the residual in one sample.
+        coefCoeff   = 1.0f - std::exp (-1.0f / (0.03f * (float) sampleRate));
+
         reset();
     }
 
@@ -1887,6 +1979,7 @@ namespace fourcolor
             fit[c] = {};
         }
         currentAmount = targetAmount;
+        diffuserPrimed = false;
     }
 
     void HarmonicSpace::setAmount (float amount01) noexcept
@@ -1906,6 +1999,16 @@ namespace fourcolor
 
         const bool monoSpace = (band == 0) || chans == 1;
 
+        //  Ridge term, relative to the accumulated energy so it is independent
+        //  of level, and the floor below which the fit is frozen rather than
+        //  solved from noise. -80 dBFS of running energy is silence.
+        constexpr float ridge = 1.0e-4f;
+        constexpr float energyFloor = 1.0e-8f;
+
+        //  Below this the diffuser contributes nothing audible, so it is not
+        //  run at all - that is the expensive half of this engine.
+        constexpr float diffuseFloor = 1.0e-4f;
+
         for (int i = 0; i < n; ++i)
         {
             currentAmount += amountCoeff * (targetAmount - currentAmount);
@@ -1915,8 +2018,11 @@ namespace fourcolor
             //  ride the one Space value.
             const float feedback = 0.15f + 0.30f * a;
             const float outGain  = 0.9f * a;
+            const bool diffusing = a > diffuseFloor;
 
-            //  Two-basis residual per channel (see header).
+            //  Two-basis residual per channel (see header). This runs whatever
+            //  Space is set to, so the coefficients are converged before anyone
+            //  turns the knob up.
             auto residualFor = [this] (int c, float wc, float cc) noexcept
             {
                 const float hc = basisHp[c].processHigh (cc);
@@ -1928,23 +2034,60 @@ namespace fourcolor
                 f.r0  += accCoeff * (wc * cc - f.r0);
                 f.r1  += accCoeff * (wc * hc - f.r1);
 
-                const float det = f.s00 * f.s11 - f.s01 * f.s01;
-                float g0, g1;
-                if (det > 1.0e-12f)
+                //  Solve only when there is something to solve. In silence the
+                //  accumulators decay towards zero and the system becomes
+                //  arbitrarily ill-conditioned; holding the last good answer is
+                //  both stabler and more musical than chasing noise.
+                const float energy = f.s00 + f.s11;
+                if (energy > energyFloor)
                 {
-                    g0 = (f.r0 * f.s11 - f.r1 * f.s01) / det;
-                    g1 = (f.r1 * f.s00 - f.r0 * f.s01) / det;
-                }
-                else
-                {
-                    g0 = f.r0 / (f.s00 + 1.0e-9f);
-                    g1 = 0.0f;
+                    //  Tikhonov: lambda scales with energy, so conditioning is
+                    //  level-independent and there is no hard determinant cliff.
+                    const float lambda = ridge * energy;
+                    const float a00 = f.s00 + lambda;
+                    const float a11 = f.s11 + lambda;
+                    const float det = a00 * a11 - f.s01 * f.s01;
+
+                    if (det > 1.0e-20f)
+                    {
+                        const float t0 = (f.r0 * a11 - f.r1 * f.s01) / det;
+                        const float t1 = (f.r1 * a00 - f.r0 * f.s01) / det;
+
+                        if (std::isfinite (t0) && std::isfinite (t1))
+                        {
+                            //  Bound first, then approach: clamping the smoothed
+                            //  value would let a spike drag it and then hold it
+                            //  pinned at the limit.
+                            const float b0 = juce::jlimit (0.0f, 4.0f, t0);
+                            const float b1 = juce::jlimit (-4.0f, 4.0f, t1);
+                            f.g0 += coefCoeff * (b0 - f.g0);
+                            f.g1 += coefCoeff * (b1 - f.g1);
+                        }
+                    }
                 }
 
-                g0 = juce::jlimit (0.0f, 4.0f, g0);
-                g1 = juce::jlimit (-4.0f, 4.0f, g1);
-                return wc - g0 * cc - g1 * hc;
+                return wc - f.g0 * cc - f.g1 * hc;
             };
+
+            //  With Space down, keep the estimator fed and leave the wet signal
+            //  exactly as it was.
+            if (! diffusing)
+            {
+                for (int c = 0; c < chans; ++c)
+                    (void) residualFor (c, w[c][i], cl[c][i]);
+
+                //  Empty the delay lines once on the way down, so turning Space
+                //  back up cannot flush out a stale tail from minutes ago.
+                if (diffuserPrimed)
+                {
+                    for (auto& d : diffuser)
+                        d.clear();
+                    diffuserPrimed = false;
+                }
+                continue;
+            }
+
+            diffuserPrimed = true;
 
             if (monoSpace)
             {
@@ -1968,122 +2111,6 @@ namespace fourcolor
                     w[c][i] += diffuser[c].process (residual * a, feedback) * outGain;
                 }
             }
-        }
-    }
-}
-
-
-===== FILE: Source/Dsp/AutoLevel.h =====
-
-// Slow, bounded, internal loudness match between the wet chain's input and its
-// output. Not a compressor: the measurement window is long, the correction is
-// clamped to +/-12 dB, silence is ignored, and the gain moves over seconds.
-// It never writes to the visible Output parameter.
-
-#pragma once
-
-#include <juce_audio_basics/juce_audio_basics.h>
-
-namespace fourcolor
-{
-    class AutoLevel
-    {
-    public:
-        AutoLevel() = default;
-
-        void prepare (double sampleRate);
-        void reset();
-
-        void setEnabled (bool shouldBeEnabled) noexcept { enabled = shouldBeEnabled; }
-
-        //  Call with the wet chain's input (post input trim, pre crossover).
-        void measureInput (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept;
-
-        //  Measures the pre-correction output, updates the slow gain, applies it.
-        void apply (juce::AudioBuffer<float>& buffer, int n, int chans) noexcept;
-
-        float getCurrentGain() const noexcept { return gain; }
-
-    private:
-        double rate = 48000.0;
-        bool enabled = true;
-
-        float inPower = 0.0f, outPower = 0.0f;
-        float measureCoeff = 0.0f;    // ~500 ms power window
-        float gainCoeff = 0.0f;       // ~1.5 s correction glide
-        float gain = 1.0f;
-
-        static constexpr float maxCorrection = 3.98f;      // +12 dB
-        static constexpr float minCorrection = 0.2512f;    // -12 dB
-        static constexpr float silenceGate = 1.0e-6f;      // -60 dBFS power
-
-        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AutoLevel)
-    };
-}
-
-
-===== FILE: Source/Dsp/AutoLevel.cpp =====
-
-#include "AutoLevel.h"
-
-namespace fourcolor
-{
-    void AutoLevel::prepare (double sampleRate)
-    {
-        rate = sampleRate;
-        measureCoeff = 1.0f - std::exp (-1.0f / (0.5f * (float) sampleRate));
-        gainCoeff    = 1.0f - std::exp (-1.0f / (1.5f * (float) sampleRate));
-        reset();
-    }
-
-    void AutoLevel::reset()
-    {
-        inPower = outPower = 0.0f;
-        gain = 1.0f;
-    }
-
-    void AutoLevel::measureInput (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
-    {
-        const float* d[2] = { buffer.getReadPointer (0),
-                              chans > 1 ? buffer.getReadPointer (1) : nullptr };
-
-        for (int i = 0; i < n; ++i)
-        {
-            float p = d[0][i] * d[0][i];
-            if (d[1] != nullptr)
-                p = 0.5f * (p + d[1][i] * d[1][i]);
-
-            inPower += measureCoeff * (p - inPower);
-        }
-    }
-
-    void AutoLevel::apply (juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
-    {
-        float* d[2] = { buffer.getWritePointer (0),
-                        chans > 1 ? buffer.getWritePointer (1) : nullptr };
-
-        for (int i = 0; i < n; ++i)
-        {
-            float p = d[0][i] * d[0][i];
-            if (d[1] != nullptr)
-                p = 0.5f * (p + d[1][i] * d[1][i]);
-
-            outPower += measureCoeff * (p - outPower);
-
-            //  Above the silence gate, glide towards the bounded correction;
-            //  in silence, hold (never chase noise floors).
-            float target = gain;
-            if (! enabled)
-                target = 1.0f;
-            else if (inPower > silenceGate && outPower > silenceGate)
-                target = juce::jlimit (minCorrection, maxCorrection,
-                                       std::sqrt (inPower / outPower));
-
-            gain += gainCoeff * (target - gain);
-
-            d[0][i] *= gain;
-            if (d[1] != nullptr)
-                d[1][i] *= gain;
         }
     }
 }
@@ -2132,6 +2159,13 @@ namespace fourcolor
             bool  bypass = false;
             float soloGain = 1.0f;        // resolved by the owner
             float centreHz = 500.0f;      // band geometric centre, for Tone
+
+            //  The band's actual frequency range, from the live crossover.
+            //  Not parameters: internal context for the colour engines, which
+            //  otherwise have no way to know whether they are shaping a 30 Hz
+            //  sub or a 12 kHz air band.
+            float bandLowHz  = 20.0f;
+            float bandHighHz = 16000.0f;
         };
 
         void setSettings (const Settings& s) noexcept;
@@ -2253,6 +2287,15 @@ namespace fourcolor
         nonlinear.setColor (s.color);
         driveSmoothed.setTargetValue (s.drivePercent);
         tone.setTone (s.tone, s.centreHz);
+
+        //  Hand the colour engines their place in the spectrum. Block rate, and
+        //  never a reset - see ColorEngine::setContext.
+        ColorContext ctx;
+        ctx.bandIndex  = bandIndex;
+        ctx.bandLowHz  = s.bandLowHz;
+        ctx.bandHighHz = s.bandHighHz;
+        ctx.centreHz   = s.centreHz;
+        nonlinear.setContext (ctx);
         behavior.setBehavior (s.behavior);
         space.setAmount (s.spacePercent * 0.01f);
 
@@ -2293,12 +2336,12 @@ namespace fourcolor
 
         //  Behavior modulation from the CLEAN band input (before tone or
         //  drive), one stereo-linked curve shared by both channels.
-        const float* modPtrs[2] = { nullptr, nullptr };
-        if (behavior.isActive())
-        {
-            behavior.writeModulation (buffer, behaviorMod.getWritePointer (0), n);
-            modPtrs[0] = modPtrs[1] = behaviorMod.getReadPointer (0);
-        }
+        //  Always written, even at amount 0: the envelopes are the detector's
+        //  memory, and freezing them means engaging the control starts from a
+        //  picture of whatever was playing when it was last touched.
+        behavior.writeModulation (buffer, behaviorMod.getWritePointer (0), n);
+        const float* modPtrs[2] = { behaviorMod.getReadPointer (0),
+                                    behaviorMod.getReadPointer (0) };
 
         //  Drive is smoothed at block granularity: the engines' curves are
         //  continuous in drive, so 32-512 sample steps of a smoothed value
@@ -2307,13 +2350,15 @@ namespace fourcolor
 
         //  Wet path: pre-tone -> oversampled colour -> post-tone.
         tone.processPre (buffer);
-        nonlinear.process (buffer, behavior.isActive() ? modPtrs : nullptr);
+        nonlinear.process (buffer, modPtrs);
         tone.processPost (buffer);
 
         //  Harmonic Space: adds the diffused nonlinear residual to the wet
-        //  path. Skipped entirely at 0% - no CPU spent.
-        if (space.isActive())
-            space.process (buffer, cleanBuffer, n);
+        //  path. Called on every block, whatever Space is set to, because
+        //  the estimator has to stay converged: starting it cold sends the
+        //  clean source into the diffuser for the first fifth of a second.
+        //  HarmonicSpace skips its own diffuser when the amount is down.
+        space.process (buffer, cleanBuffer, n);
 
         //  Mix / level / mute / bypass / solo, all with per-sample fades.
         //  Samples outer, channels inner, so each SmoothedValue advances
@@ -2419,6 +2464,12 @@ namespace fourcolor
         //  Copies values only; must not allocate.
         void setParameters (const EngineParameters& p) noexcept;
 
+        //  Called with the signal AFTER input trim and BEFORE the crossover -
+        //  the level actually entering the colour engines, which is what the
+        //  input meter is supposed to show. The processor supplies this so the
+        //  DSP has no dependency on the meter type.
+        std::function<void (const juce::AudioBuffer<float>&, int, int)> onInputMeasured;
+
         void process (juce::AudioBuffer<float>& buffer) noexcept;
 
         //  Total latency of the wet path at the host rate (integer contract).
@@ -2496,7 +2547,7 @@ namespace fourcolor
         mixDryBuffer.setSize (numChannels, maxBlockSize);
         apRefBuffer.setSize (numChannels, maxBlockSize);
 
-        autoLevel.prepare (sampleRate);
+        autoLevel.prepare (sampleRate, maxBlockSize);
 
         const int maxDelay = (int) std::ceil (bands[0].getNonlinearStage().getMaxLatencySamples()) + 8;
         const juce::dsp::ProcessSpec spec { sampleRate, (juce::uint32) maxBlockSize,
@@ -2587,6 +2638,11 @@ namespace fourcolor
             std::sqrt (f2 * f3),    std::sqrt (f3 * 16000.0f)
         };
 
+        //  The same edges the centres are built from, handed to the colour
+        //  engines as internal context. 20 Hz and 16 kHz are the ends of the
+        //  instrument's working range, not filter corners.
+        const float edges[numBands + 1] = { 20.0f, f1, f2, f3, 16000.0f };
+
         for (int b = 0; b < numBands; ++b)
         {
             bands[b].setQuality (p.quality);
@@ -2607,6 +2663,8 @@ namespace fourcolor
             s.bypass       = p.bands[b].bypass;
             s.soloGain     = anySolo ? (p.bands[b].solo ? 1.0f : 0.0f) : 1.0f;
             s.centreHz     = centres[b];
+            s.bandLowHz    = edges[b];
+            s.bandHighHz   = edges[b + 1];
             bands[b].setSettings (s);
         }
 
@@ -2648,6 +2706,13 @@ namespace fourcolor
 
         //  Loudness reference for Auto Level: the wet chain's own input.
         autoLevel.measureInput (buffer, n, chans);
+
+        //  Same point for the input meter. It used to be measured at the top of
+        //  processBlock, which is BEFORE the trim is applied - so the meter was
+        //  showing the level going in rather than the level the engines see,
+        //  and moving Input Trim did not move it.
+        if (onInputMeasured != nullptr)
+            onInputMeasured (buffer, n, chans);
 
         //  Split, process each band, recombine. The crossover also emits its
         //  allpass reference - the phase-matched dry leg for Mix.
@@ -2809,6 +2874,46 @@ namespace fourcolor
         //  --- UI services ---------------------------------------------------------
         //  Block-peak meters (atomics written on the audio thread). Channel
         //  0 = L, 1 = R; the mono sum forms are kept for the older callers.
+        //  Everything the meters need, published lock-free from the audio
+        //  thread: block peak and block mean-square per channel, plus a clip
+        //  latch. Ballistics, hold and decay all live in the GUI - the audio
+        //  thread only ever writes raw numbers.
+        struct MeterBlock
+        {
+            std::atomic<float> peak[2] { { 0.0f }, { 0.0f } };
+            std::atomic<float> meanSquare[2] { { 0.0f }, { 0.0f } };
+            std::atomic<bool>  clipped { false };
+
+            void submit (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
+            {
+                for (int m = 0; m < 2; ++m)
+                {
+                    const int src = juce::jmin (m, chans - 1);
+                    const auto* d = buffer.getReadPointer (src);
+
+                    float p = 0.0f;
+                    double sumSq = 0.0;
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const float v = d[i];
+                        p = juce::jmax (p, std::abs (v));
+                        sumSq += (double) v * v;
+                    }
+
+                    if (p > peak[m].load (std::memory_order_relaxed))
+                        peak[m].store (p, std::memory_order_relaxed);
+
+                    meanSquare[m].store ((float) (sumSq / juce::jmax (1, n)),
+                                         std::memory_order_relaxed);
+
+                    if (p >= 1.0f)
+                        clipped.store (true, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        MeterBlock inputMeter, outputMeter;
+
         float readAndResetInputPeak() noexcept  { return juce::jmax (inputPeak[0].exchange (0.0f),
                                                                      inputPeak[1].exchange (0.0f)); }
         float readAndResetOutputPeak() noexcept { return juce::jmax (outputPeak[0].exchange (0.0f),
@@ -2900,6 +3005,7 @@ namespace fourcolor
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Core/PresetLibrary.h"
+#include "Core/StateMigration.h"
 
 namespace fourcolor
 {
@@ -3008,6 +3114,15 @@ namespace fourcolor
         apvts.state.setProperty ("selectedBand", 0, nullptr);
         cacheParameterPointers();
 
+        //  The input meter reads AFTER input trim and BEFORE the crossover -
+        //  the level the colour engines actually see. Measuring it at the top
+        //  of processBlock, as this used to, showed the level going in and did
+        //  not move when Input Trim did.
+        engine.onInputMeasured = [this] (const juce::AudioBuffer<float>& b, int n, int chans)
+        {
+            inputMeter.submit (b, n, chans);
+        };
+
         //  Any parameter edit marks the current preset as modified in the UI.
         for (auto* p : getParameters())
             if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p))
@@ -3114,20 +3229,16 @@ namespace fourcolor
         for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
             buffer.clear (ch, 0, buffer.getNumSamples());
 
-        //  Stereo input meters (block peaks, lock-free). Mono runs feed both.
         const int meterChannels = juce::jmin (2, buffer.getNumChannels());
-        for (int m = 0; m < 2; ++m)
-        {
-            const int src = juce::jmin (m, meterChannels - 1);
-            const float peak = buffer.getMagnitude (src, 0, buffer.getNumSamples());
-            if (peak > inputPeak[m].load (std::memory_order_relaxed))
-                inputPeak[m].store (peak, std::memory_order_relaxed);
-        }
 
         pushParametersToEngine();
         engine.process (buffer);
 
         pushSpectrumSamples (buffer);
+
+        //  Output meter: after output trim and after the safety stage, which is
+        //  exactly what leaves the plug-in.
+        outputMeter.submit (buffer, buffer.getNumSamples(), meterChannels);
 
         for (int m = 0; m < 2; ++m)
         {
@@ -3246,17 +3357,30 @@ namespace fourcolor
     // --- state -------------------------------------------------------------------
     void FourColorProcessor::getStateInformation (juce::MemoryBlock& destData)
     {
+        //  Parameters plus a few editor properties. Nothing from the audio path
+        //  is written: no pointers, no buffers, no analyzer data.
         auto state = apvts.copyState();
+        state::stampVersion (state);
+
         juce::MemoryOutputStream stream (destData, false);
         state.writeToStream (stream);
     }
 
     void FourColorProcessor::setStateInformation (const void* data, int sizeInBytes)
     {
+        if (data == nullptr || sizeInBytes <= 0)
+            return;
+
         auto tree = juce::ValueTree::readFromData (data, (size_t) sizeInBytes);
 
-        if (tree.isValid() && tree.hasType (apvts.state.getType()))
-            apvts.replaceState (tree);
+        //  A state that cannot be migrated leaves the plug-in exactly as it
+        //  was. Refusing to load is always better than loading half of it.
+        const auto result = state::migrate (tree, apvts);
+        if (! result.usable)
+            return;
+
+        apvts.replaceState (tree);
+        presetDirty.store (false);
     }
 
     juce::AudioProcessorEditor* FourColorProcessor::createEditor()
