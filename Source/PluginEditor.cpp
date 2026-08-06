@@ -9,18 +9,18 @@ namespace fourcolor
 
         addAndMakeVisible (topBar);
         addAndMakeVisible (analyzer);
-        addAndMakeVisible (bandCards);
+        addAndMakeVisible (bandHeaders);
         addAndMakeVisible (bandStrip);
         addAndMakeVisible (globalBar);
 
         selectedBand = juce::jlimit (0, numBands - 1,
                                      (int) proc.apvts.state.getProperty ("selectedBand", 0));
         analyzer.setSelectedBand (selectedBand);
-        bandCards.setSelectedBand (selectedBand);
+        bandHeaders.setSelectedBand (selectedBand);
         bandStrip.setBand (selectedBand);
 
         analyzer.onBandSelected  = [this] (int b) { selectBand (b); };
-        bandCards.onBandSelected = [this] (int b) { selectBand (b); };
+        bandHeaders.onBandSelected = [this] (int b) { selectBand (b); };
 
         //  While a control is being dragged, the analyzer emphasises the region
         //  it affects. The kind codes match Analyzer::Emphasis.
@@ -48,7 +48,7 @@ namespace fourcolor
     {
         selectedBand = juce::jlimit (0, numBands - 1, band);
         analyzer.setSelectedBand (selectedBand);
-        bandCards.setSelectedBand (selectedBand);
+        bandHeaders.setSelectedBand (selectedBand);
         bandStrip.setBand (selectedBand);
         proc.apvts.state.setProperty ("selectedBand", selectedBand, nullptr);
     }
@@ -94,8 +94,8 @@ namespace fourcolor
         };
 
         topBar.setBounds (0, 0, getWidth(), juce::roundToInt (h * topBarBottom));
+        bandHeaders.setBounds (rowBetween (headersTop, headersBottom));
         analyzer.setBounds (rowBetween (analyzerTop, analyzerBottom));
-        bandCards.setBounds (rowBetween (cardsTop, cardsBottom));
         bandStrip.setBounds (rowBetween (panelTop, panelBottom));
         globalBar.setBounds (rowBetween (globalTop, 1.0f).withTrimmedBottom (margin / 2));
     }

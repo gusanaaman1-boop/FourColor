@@ -40,6 +40,12 @@ namespace fourcolor::ui
         std::function<void (int band)> onBandSelected;
 
         void setSelectedBand (int band);
+
+        //  0 = band powered off, 1 = fully on. Only the COLOUR of that band's
+        //  spectrum fades; the spectrum itself keeps being drawn, because the
+        //  audio is still there - a powered-off band passes clean, it is not
+        //  muted, and showing a hole would be a lie about the signal.
+        void setBandPower (int band, float fade);
         float getCutHz (int i) const noexcept { return cutValues[i]; }
 
         //  Temporary emphasis while the user drags a control elsewhere.
@@ -107,6 +113,7 @@ namespace fourcolor::ui
         ResidualProvider residualProvider;
 
         int selectedBand = 0;
+        float bandPower[numBands] = { 1.0f, 1.0f, 1.0f, 1.0f };
         int draggingHandle = -1;
         int hoverHandle = -1;
         Emphasis emphasis = Emphasis::none;

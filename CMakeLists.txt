@@ -91,7 +91,7 @@ set(FOURCOLOR_CORE_SOURCES
     Source/Dsp/NonlinearStage.cpp
     Source/Dsp/ToneStage.cpp
     Source/Ui/Analyzer.cpp
-    Source/Ui/BandCards.cpp
+    Source/Ui/BandHeaders.cpp
     Source/Ui/BandStrip.cpp
     Source/Ui/GlobalBar.cpp
     Source/Ui/Knob.cpp

@@ -10,7 +10,6 @@ namespace fourcolor::ui
         constexpr float topDb = 12.0f, bottomDb = -12.0f;
 
         constexpr float tagRow    = 24.0f;   // frequency values above the plot
-        constexpr float leftAxis  = 32.0f;   // dB scale
         constexpr float rightAxis = 22.0f;   // L / C / R marks
         constexpr float bottomAxis = 20.0f;  // frequency labels
 
@@ -55,6 +54,16 @@ namespace fourcolor::ui
     }
 
     Analyzer::~Analyzer() = default;
+
+    void Analyzer::setBandPower (int band, float fade)
+    {
+        const int b = juce::jlimit (0, numBands - 1, band);
+        if (std::abs (bandPower[b] - fade) > 1.0e-3f)
+        {
+            bandPower[b] = fade;
+            repaint();
+        }
+    }
 
     void Analyzer::setSelectedBand (int band)
     {
@@ -176,7 +185,7 @@ namespace fourcolor::ui
     {
         return getLocalBounds().toFloat()
             .withTrimmedTop (tagRow)
-            .withTrimmedLeft (leftAxis)
+            .withTrimmedLeft (metric::leftAxis)
             .withTrimmedRight (rightAxis)
             .withTrimmedBottom (bottomAxis);
     }
@@ -251,7 +260,7 @@ namespace fourcolor::ui
             g.drawHorizontalLine ((int) ty, area.getX(), area.getRight());
             g.setColour (tokens::textMuted);
             g.drawText ((db > 0 ? "+" : "") + juce::String (db),
-                        2, (int) ty - 7, (int) leftAxis - 6, 14,
+                        2, (int) ty - 7, (int) metric::leftAxis - 6, 14,
                         juce::Justification::centredRight);
         }
 
@@ -303,7 +312,8 @@ namespace fourcolor::ui
                     if (! started) { curve.startNewSubPath (px, ty); started = true; }
                     else             curve.lineTo (px, ty);
                 }
-                g.setColour (tokens::band[b].withAlpha (b == selectedBand ? 0.28f : 0.18f));
+                g.setColour (tokens::band[b].withAlpha ((b == selectedBand ? 0.28f : 0.18f)
+                                                            * bandPower[b]));
                 g.strokePath (curve, juce::PathStrokeType (1.0f));
             }
         }
@@ -404,7 +414,9 @@ namespace fourcolor::ui
 
             const auto paths = buildBand (columnForX (x0), columnForX (x1));
 
-            const auto c = tokens::band[b];
+            //  Drained towards the neutral text colour rather than removed:
+            //  the band is still passing audio, so its contour must stay.
+            const auto c = tokens::textMuted.interpolatedWith (tokens::band[b], bandPower[b]);
             const bool isSel = b == selectedBand;
             const bool isEmph = emphasis != Emphasis::none && b == emphasisBand;
 

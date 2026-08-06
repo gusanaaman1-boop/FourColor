@@ -66,10 +66,13 @@ namespace fourcolor::ui
     {
         //  Window fractions from the specification (§4).
         constexpr float topBarBottom     = 0.080f;
-        constexpr float analyzerTop      = 0.080f;
-        constexpr float analyzerBottom   = 0.370f;
-        constexpr float cardsTop         = 0.380f;
-        constexpr float cardsBottom      = 0.525f;
+        //  The band cards are gone: their S/M/B moved into the headers, so the
+        //  analyzer absorbs the space they used. It is the first thing in the
+        //  visual priority order and it was the smallest thing on screen.
+        constexpr float headersTop       = 0.080f;
+        constexpr float headersBottom    = 0.128f;
+        constexpr float analyzerTop      = 0.130f;
+        constexpr float analyzerBottom   = 0.525f;
         constexpr float panelTop         = 0.535f;
         constexpr float panelBottom      = 0.805f;
         constexpr float globalTop        = 0.815f;
@@ -78,6 +81,10 @@ namespace fourcolor::ui
         constexpr float cardGap          = 7.0f;
         constexpr float corner           = 7.0f;
         constexpr float cornerSmall      = 5.0f;
+
+        //  Width of the analyzer's dB scale. The band headers align to the
+        //  same plot area, so both must use one number.
+        constexpr float leftAxis         = 32.0f;
 
         //  Knob arc geometry (270 degrees, 225 -> 495).
         constexpr float arcStart = 3.92699f;   // 225 deg
