@@ -49,6 +49,46 @@ namespace fourcolor
         //  --- UI services ---------------------------------------------------------
         //  Block-peak meters (atomics written on the audio thread). Channel
         //  0 = L, 1 = R; the mono sum forms are kept for the older callers.
+        //  Everything the meters need, published lock-free from the audio
+        //  thread: block peak and block mean-square per channel, plus a clip
+        //  latch. Ballistics, hold and decay all live in the GUI - the audio
+        //  thread only ever writes raw numbers.
+        struct MeterBlock
+        {
+            std::atomic<float> peak[2] { { 0.0f }, { 0.0f } };
+            std::atomic<float> meanSquare[2] { { 0.0f }, { 0.0f } };
+            std::atomic<bool>  clipped { false };
+
+            void submit (const juce::AudioBuffer<float>& buffer, int n, int chans) noexcept
+            {
+                for (int m = 0; m < 2; ++m)
+                {
+                    const int src = juce::jmin (m, chans - 1);
+                    const auto* d = buffer.getReadPointer (src);
+
+                    float p = 0.0f;
+                    double sumSq = 0.0;
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const float v = d[i];
+                        p = juce::jmax (p, std::abs (v));
+                        sumSq += (double) v * v;
+                    }
+
+                    if (p > peak[m].load (std::memory_order_relaxed))
+                        peak[m].store (p, std::memory_order_relaxed);
+
+                    meanSquare[m].store ((float) (sumSq / juce::jmax (1, n)),
+                                         std::memory_order_relaxed);
+
+                    if (p >= 1.0f)
+                        clipped.store (true, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        MeterBlock inputMeter, outputMeter;
+
         float readAndResetInputPeak() noexcept  { return juce::jmax (inputPeak[0].exchange (0.0f),
                                                                      inputPeak[1].exchange (0.0f)); }
         float readAndResetOutputPeak() noexcept { return juce::jmax (outputPeak[0].exchange (0.0f),

@@ -110,6 +110,15 @@ namespace fourcolor
         apvts.state.setProperty ("selectedBand", 0, nullptr);
         cacheParameterPointers();
 
+        //  The input meter reads AFTER input trim and BEFORE the crossover -
+        //  the level the colour engines actually see. Measuring it at the top
+        //  of processBlock, as this used to, showed the level going in and did
+        //  not move when Input Trim did.
+        engine.onInputMeasured = [this] (const juce::AudioBuffer<float>& b, int n, int chans)
+        {
+            inputMeter.submit (b, n, chans);
+        };
+
         //  Any parameter edit marks the current preset as modified in the UI.
         for (auto* p : getParameters())
             if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p))
@@ -216,20 +225,16 @@ namespace fourcolor
         for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
             buffer.clear (ch, 0, buffer.getNumSamples());
 
-        //  Stereo input meters (block peaks, lock-free). Mono runs feed both.
         const int meterChannels = juce::jmin (2, buffer.getNumChannels());
-        for (int m = 0; m < 2; ++m)
-        {
-            const int src = juce::jmin (m, meterChannels - 1);
-            const float peak = buffer.getMagnitude (src, 0, buffer.getNumSamples());
-            if (peak > inputPeak[m].load (std::memory_order_relaxed))
-                inputPeak[m].store (peak, std::memory_order_relaxed);
-        }
 
         pushParametersToEngine();
         engine.process (buffer);
 
         pushSpectrumSamples (buffer);
+
+        //  Output meter: after output trim and after the safety stage, which is
+        //  exactly what leaves the plug-in.
+        outputMeter.submit (buffer, buffer.getNumSamples(), meterChannels);
 
         for (int m = 0; m < 2; ++m)
         {

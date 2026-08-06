@@ -64,6 +64,12 @@ namespace fourcolor
         //  Copies values only; must not allocate.
         void setParameters (const EngineParameters& p) noexcept;
 
+        //  Called with the signal AFTER input trim and BEFORE the crossover -
+        //  the level actually entering the colour engines, which is what the
+        //  input meter is supposed to show. The processor supplies this so the
+        //  DSP has no dependency on the meter type.
+        std::function<void (const juce::AudioBuffer<float>&, int, int)> onInputMeasured;
+
         void process (juce::AudioBuffer<float>& buffer) noexcept;
 
         //  Total latency of the wet path at the host rate (integer contract).

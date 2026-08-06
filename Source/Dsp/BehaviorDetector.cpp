@@ -30,12 +30,22 @@ namespace fourcolor
         //  head, slow enough to be click-free.
         modSmooth = onePoleCoeff (sampleRate, 0.003f);
 
+        //  BODY's reference envelope: rises with the material, falls slowly
+        //  enough to survive a whole decay. Falling fast would make the
+        //  reference chase the decay downwards and the deficit would never
+        //  open - BODY would do nothing on exactly the material it exists for.
+        //                            LOW    LMID   HMID   HIGH
+        constexpr float refRiseMs[] = { 40.0f, 30.0f, 22.0f, 18.0f };
+        constexpr float refFallMs[] = { 1200.0f, 1000.0f, 800.0f, 700.0f };
+        referenceRise = onePoleCoeff (sampleRate, refRiseMs[b] * 0.001f);
+        referenceFall = onePoleCoeff (sampleRate, refFallMs[b] * 0.001f);
+
         reset();
     }
 
     void BehaviorDetector::reset()
     {
-        fastEnv = slowEnv = 0.0f;
+        fastEnv = slowEnv = referenceEnv = 0.0f;
         modState = 1.0f;
     }
 
@@ -46,8 +56,9 @@ namespace fourcolor
         const float* l = bandInput.getReadPointer (0);
         const float* r = chans > 1 ? bandInput.getReadPointer (1) : nullptr;
 
-        //  +/-6 dB at full transient measure and full amount.
-        const float depthDb = maxModDb * amount;
+        //  The two sides are separate mechanisms, so they get separate depths.
+        const float attackAmount = juce::jmax (0.0f, amount);
+        const float bodyAmount   = juce::jmax (0.0f, -amount);
 
         for (int i = 0; i < n; ++i)
         {
@@ -59,16 +70,50 @@ namespace fourcolor
             fastEnv += (mag > fastEnv ? fastAtk : fastRel) * (mag - fastEnv);
             slowEnv += (mag > slowEnv ? slowAtk : slowRel) * (mag - slowEnv);
 
+            //  The reference BODY measures against: rises with the material,
+            //  falls slowly, so it holds the level of the recent passage.
+            referenceEnv += (mag > referenceEnv ? referenceRise : referenceFall)
+                          * (mag - referenceEnv);
+
             //  Bounded transient measure: 0 in steady state, -> 1 when the fast
             //  follower runs ahead of the slow one (i.e. on attacks).
             const float transient = (fastEnv - slowEnv) / (fastEnv + slowEnv + 1.0e-6f);
             const float t = juce::jlimit (0.0f, 1.0f, transient * 2.0f);
 
+            float targetDb = maxModDb * attackAmount * t;
+
+            //  --- BODY ------------------------------------------------------
+            //  How far below its own recent reference the signal has fallen,
+            //  and therefore how much colour it is currently NOT getting.
+            if (bodyAmount > 1.0e-4f)
+            {
+                const float levelDb = juce::Decibels::gainToDecibels (slowEnv, -120.0f);
+                const float refDb   = juce::Decibels::gainToDecibels (referenceEnv, -120.0f);
+
+                const float deficitDb = juce::jlimit (0.0f, bodyRangeDb, refDb - levelDb);
+
+                //  Absolute floor, faded rather than gated: a hard gate on a
+                //  gain path is a click, and this path is a gain path.
+                const float protection =
+                    juce::jlimit (0.0f, 1.0f, (levelDb - bodyFloorDb) / bodyFadeDb);
+
+                //  The transient itself is deliberately excluded. BODY is not
+                //  allowed to make the hit louder - that is ATTACK's job, and
+                //  the brief asks for the initial attack window to stay put.
+                const float bodyOnly = 1.0f - t;
+
+                //  Baseline on all sustained material, plus the deficit term.
+                const float shape = bodyBaseline
+                                  + (1.0f - bodyBaseline) * (deficitDb / bodyRangeDb);
+
+                targetDb += maxBodyDb * bodyAmount * shape * protection * bodyOnly;
+            }
+
             //  dB-linear modulation of the pre-gain, then one-pole smoothing.
-            //  At amount 0 depthDb is 0, so the target is unity and modState
-            //  RELAXES to 1.0 through the same smoother instead of snapping -
-            //  which is what makes turning the control to zero click-free.
-            const float targetDb = depthDb * t;
+            //  At amount 0 both depths are 0, so the target is unity and
+            //  modState RELAXES to 1.0 through the same smoother instead of
+            //  snapping - which is what makes moving the control to zero
+            //  click-free.
             const float target = std::exp (targetDb * 0.115129254f);   // ln(10)/20
             modState += modSmooth * (target - modState);
             modOut[i] = modState;

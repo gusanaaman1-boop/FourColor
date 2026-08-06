@@ -180,6 +180,13 @@ namespace fourcolor
         //  Loudness reference for Auto Level: the wet chain's own input.
         autoLevel.measureInput (buffer, n, chans);
 
+        //  Same point for the input meter. It used to be measured at the top of
+        //  processBlock, which is BEFORE the trim is applied - so the meter was
+        //  showing the level going in rather than the level the engines see,
+        //  and moving Input Trim did not move it.
+        if (onInputMeasured != nullptr)
+            onInputMeasured (buffer, n, chans);
+
         //  Split, process each band, recombine. The crossover also emits its
         //  allpass reference - the phase-matched dry leg for Mix.
         crossover.process (buffer, bandBuffers, &apRefBuffer);

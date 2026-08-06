@@ -1684,7 +1684,7 @@ namespace
 
 static void testBehaviorAttackVsBody()
 {
-    section ("Phase 5: BODY vs ATTACK are different behaviours");
+    section ("Phase 3: ATTACK drives the hit, BODY fills the decay");
 
     const auto body    = measureKickTrain (-1.0f);
     const auto neutral = measureKickTrain (0.0f);
@@ -1695,19 +1695,216 @@ static void testBehaviorAttackVsBody()
     std::printf ("      body RMS:      BODY %.4f, neutral %.4f, ATTACK %.4f\n",
                  body.body, neutral.body, attack.body);
 
-    //  ATTACK distorts the hit harder than BODY: clearly more edge (derivative
-    //  energy) in the attack window, monotone across the range.
-    const double crunchGapDb = Decibels::gainToDecibels (attack.attackCrunch / body.attackCrunch);
-    check (crunchGapDb > 1.5, "ATTACK puts >1.5 dB more crunch on the hit than BODY ("
-                                  + String (crunchGapDb, 2) + " dB)");
-    check (attack.attackCrunch >= neutral.attackCrunch * 0.98
-               && neutral.attackCrunch >= body.attackCrunch * 0.98,
-           "crunch is monotone from BODY through neutral to ATTACK");
+    //  ATTACK still has to out-crunch the neutral centre on the hit. It is no
+    //  longer compared against BODY for this, because BODY is no longer the
+    //  opposite of it: since the SHAPE rework, negative values ADD density to
+    //  the decay instead of merely removing drive from the transient, so both
+    //  ends of the axis now raise measured edge energy and "ATTACK beats BODY
+    //  on crunch" stopped being the thing the control promises.
+    const double attackVsNeutralDb =
+        Decibels::gainToDecibels (attack.attackCrunch / neutral.attackCrunch);
+    check (attackVsNeutralDb > 0.8,
+           "ATTACK puts more crunch on the hit than the neutral centre ("
+               + String (attackVsNeutralDb, 2) + " dB)");
 
-    //  And it must NOT be a volume knob: overall body level within 3 dB.
+    //  BODY's own promise, measured where it actually acts: the decay.
+    const double bodyLiftDb = Decibels::gainToDecibels (body.body / neutral.body);
+    check (bodyLiftDb > 0.4,
+           "BODY raises the decay above the neutral centre ("
+               + String (bodyLiftDb, 2) + " dB)");
+
+    //  And neither end is a volume knob.
     const double bodyShift = std::abs (Decibels::gainToDecibels (attack.body / body.body));
     check (bodyShift < 3.0, "sustain level shift between extremes is bounded ("
                                 + String (bodyShift, 2) + " dB)");
+}
+
+// ================================================================================
+//  Phase 3: BODY is upward density, and it does not lift silence
+// ================================================================================
+namespace
+{
+    //  A note that hits once and then decays for a long time - the shape BODY
+    //  exists for. Returns the whole render so attack, decay and the silent
+    //  tail can each be measured separately.
+    std::vector<float> renderDecayNote (float behavior, ColorType color,
+                                        double freq, double decayRate,
+                                        double sr, int block, int blocks)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        for (auto& b : p.bands)
+        {
+            b.color = color;
+            b.drive = 55.0f;
+            b.behavior = behavior;
+            b.space = 0.0f;
+        }
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        std::vector<float> out;
+        int s = 0;
+
+        for (int blk = 0; blk < blocks; ++blk)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++s)
+            {
+                //  One hit at the start, then decay, then true silence.
+                const double t = (double) s / sr;
+                d[i] = t < 1.6 ? (float) (0.7 * std::exp (-t * decayRate)
+                                          * std::sin (2.0 * MathConstants<double>::pi * freq * t))
+                               : 0.0f;
+            }
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            for (int i = 0; i < block; ++i)
+                out.push_back (io.getSample (0, i));
+        }
+
+        return out;
+    }
+
+    double rmsBetween (const std::vector<float>& x, double fromSec, double toSec, double sr)
+    {
+        const auto a = (size_t) (fromSec * sr), b = (size_t) (toSec * sr);
+        if (b <= a || b > x.size())
+            return 0.0;
+        double sum = 0.0;
+        for (size_t i = a; i < b; ++i)
+            sum += (double) x[i] * x[i];
+        return std::sqrt (sum / (double) (b - a));
+    }
+}
+
+static void testBodyIsUpwardDensity()
+{
+    section ("Phase 3: BODY lifts the decay, not the hit and not the silence");
+
+    const double sr = 48000.0;
+    const int block = 256;
+    const int blocks = 470;              // ~2.5 s: hit, decay, then silence
+
+    struct Case { const char* name; double freq; double decay; ColorType color; };
+    const Case cases[] = {
+        { "bass note", 82.0,  1.7, ColorType::warm },
+        { "808",       48.0,  0.9, ColorType::warm },
+        { "pad",      220.0,  0.5, ColorType::iron },
+        { "vocal",    196.0,  0.7, ColorType::bite },
+    };
+
+    double worstAttackRise = -100.0, worstSilenceRise = -100.0;
+    double weakestDecayLift = 100.0;
+
+    for (const auto& c : cases)
+    {
+        const auto neutral = renderDecayNote (0.0f, c.color, c.freq, c.decay, sr, block, blocks);
+        const auto bodied  = renderDecayNote (-100.0f, c.color, c.freq, c.decay, sr, block, blocks);
+
+        //  The three windows the brief names.
+        const double attackNeutral = rmsBetween (neutral, 0.000, 0.020, sr);
+        const double attackBody    = rmsBetween (bodied,  0.000, 0.020, sr);
+
+        const double decayNeutral  = rmsBetween (neutral, 0.35, 1.50, sr);
+        const double decayBody     = rmsBetween (bodied,  0.35, 1.50, sr);
+
+        //  After 1.6 s the source is digital black, so anything here is the
+        //  plug-in's own floor being lifted.
+        const double silenceNeutral = rmsBetween (neutral, 1.90, 2.40, sr);
+        const double silenceBody    = rmsBetween (bodied,  1.90, 2.40, sr);
+
+        const double attackRise  = Decibels::gainToDecibels (attackBody / jmax (1.0e-12, attackNeutral));
+        const double decayLift   = Decibels::gainToDecibels (decayBody / jmax (1.0e-12, decayNeutral));
+        //  The silent tail is judged on its ABSOLUTE level, not as a ratio.
+        //  Both renders are near zero there, and a ratio between two numbers
+        //  that are both essentially nothing reports enormous dB changes about
+        //  something inaudible.
+        const double silenceBodyDb = Decibels::gainToDecibels (silenceBody, -200.0);
+
+        std::printf ("      %-10s decay %+5.2f dB   attack %+5.2f dB   tail %.1f dBFS"
+                     " (neutral %.1f)\n",
+                     c.name, decayLift, attackRise, silenceBodyDb,
+                     Decibels::gainToDecibels (silenceNeutral, -200.0));
+
+        weakestDecayLift = jmin (weakestDecayLift, decayLift);
+        worstAttackRise  = jmax (worstAttackRise, attackRise);
+        worstSilenceRise = jmax (worstSilenceRise, silenceBodyDb);
+    }
+
+    check (weakestDecayLift > 2.0,
+           "BODY adds at least 2 dB to the decay on every source (weakest "
+               + String (weakestDecayLift, 2) + " dB)");
+    check (worstAttackRise < 1.0,
+           "BODY leaves the initial attack alone (worst rise "
+               + String (worstAttackRise, 2) + " dB)");
+    check (worstSilenceRise < -80.0,
+           "BODY leaves the silent tail below -80 dBFS (worst "
+               + String (worstSilenceRise, 1) + " dBFS)");
+}
+
+static void testBodyDoesNotLiftNoiseFloor()
+{
+    section ("Phase 3: BODY does not lift a noise floor");
+
+    const double sr = 48000.0;
+    const int block = 256;
+
+    //  A -66 dBFS hiss with nothing else: below the absolute floor, so the
+    //  relative deficit is large and only the floor protection stops it being
+    //  lifted. This is the case a purely relative rule would fail.
+    auto render = [&] (float behavior)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        for (auto& b : p.bands)
+        {
+            b.color = ColorType::warm;
+            b.drive = 55.0f;
+            b.behavior = behavior;
+            b.space = 0.0f;
+        }
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        Random rng (4242);
+        std::vector<float> out;
+
+        for (int blk = 0; blk < 380; ++blk)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i)
+                d[i] = 0.0005f * (rng.nextFloat() * 2.0f - 1.0f);   // about -66 dBFS
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (blk > 180)
+                for (int i = 0; i < block; ++i)
+                    out.push_back (io.getSample (0, i));
+        }
+
+        double sum = 0.0;
+        for (auto v : out) sum += (double) v * v;
+        return std::sqrt (sum / (double) (out.empty() ? 1 : out.size()));
+    };
+
+    const double neutral = render (0.0f);
+    const double bodied  = render (-100.0f);
+    const double riseDb = Decibels::gainToDecibels ((bodied + 1.0e-12) / (neutral + 1.0e-12));
+
+    std::printf ("      noise floor at -66 dBFS rises %+.3f dB under full BODY\n", riseDb);
+
+    check (riseDb < 0.25,
+           "a noise floor is not lifted by BODY (" + String (riseDb, 3) + " dB)");
 }
 
 static void testBehaviorNoPumpingOnSustained()
@@ -2498,7 +2695,7 @@ static void testBehaviorNoRippleOnSustained()
 
 static void testBehaviorSweepIsMonotonic()
 {
-    section ("Phase 15: BODY -> ATTACK is monotonic on real material");
+    section ("Phase 3: each side of SHAPE is monotonic on its own measure");
 
     const double sr = 48000.0;
     const int block = 256;
@@ -2580,21 +2777,39 @@ static void testBehaviorSweepIsMonotonic()
         for (int i = 0; i < 5; ++i)
             crunch[i] = crunchFor ((float) values[i], color);
 
-        bool monotonic = true;
-        for (int i = 1; i < 5; ++i)
-            monotonic = monotonic && crunch[i] >= crunch[i - 1] * 0.995;
+        //  Since the SHAPE rework the axis is no longer one quantity swept
+        //  from low to high. BODY and ATTACK are two mechanisms, and BOTH raise
+        //  edge energy on a kick - ATTACK by driving the hit, BODY by filling
+        //  the decay that follows it inside the same window. So the curve is
+        //  V-shaped, and "monotone from BODY to ATTACK" is testing a promise
+        //  the control no longer makes.
+        //
+        //  Each side is now checked on its own measure, from the neutral centre
+        //  outwards.
+        const double neutral = crunch[2];
+        bool attackMonotonic = crunch[3] >= neutral * 0.995 && crunch[4] >= crunch[3] * 0.995;
+        bool bodyMonotonic   = crunch[1] >= neutral * 0.995 && crunch[0] >= crunch[1] * 0.995;
 
-        const double spreadDb = 20.0 * std::log10 (crunch[4] / jmax (1.0e-12, crunch[0]));
+        const double attackDb = 20.0 * std::log10 (crunch[4] / jmax (1.0e-12, neutral));
+        const double bodyDb   = 20.0 * std::log10 (crunch[0] / jmax (1.0e-12, neutral));
 
-        std::printf ("      %-4s crunch BODY->ATTACK: %.3f %.3f %.3f %.3f %.3f  (spread %.2f dB)\n",
+        std::printf ("      %-4s BODY..ATTACK: %.3f %.3f %.3f %.3f %.3f"
+                     "  (attack %+.2f dB, body %+.2f dB vs centre)\n",
                      engineNames[colorIndex], crunch[0], crunch[1], crunch[2],
-                     crunch[3], crunch[4], spreadDb);
+                     crunch[3], crunch[4], attackDb, bodyDb);
 
-        check (monotonic,
-               String (engineNames[colorIndex]) + ": crunch rises monotonically from BODY to ATTACK");
-        check (spreadDb > 1.0,
-               String (engineNames[colorIndex]) + ": BODY and ATTACK are audibly different ("
-                   + String (spreadDb, 2) + " dB)");
+        //  Only ATTACK is judged here. Crunch is edge energy in the attack
+        //  window - an ATTACK measure - and BITE, whose whole job is edge,
+        //  gains no edge from having its decay filled: it reads -0.11 dB while
+        //  plainly working. BODY is asserted in testBodyIsUpwardDensity, on
+        //  decay RMS across four sources, which is the quantity it moves.
+        juce::ignoreUnused (bodyMonotonic);
+
+        check (attackMonotonic,
+               String (engineNames[colorIndex]) + ": ATTACK rises monotonically from centre");
+        check (attackDb > 0.5,
+               String (engineNames[colorIndex]) + ": ATTACK is audible against the centre ("
+                   + String (attackDb, 2) + " dB)");
     }
 }
 
@@ -4199,6 +4414,8 @@ int main()
     testQualitySwitchIsSeamless();
 
     testBehaviorAttackVsBody();
+    testBodyIsUpwardDensity();
+    testBodyDoesNotLiftNoiseFloor();
     testBehaviorNoPumpingOnSustained();
     testBehaviorStereoLinked();
 
