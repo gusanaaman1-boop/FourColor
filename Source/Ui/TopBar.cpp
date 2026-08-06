@@ -98,9 +98,62 @@ namespace fourcolor::ui
         juce::String text { "Default" };
     };
 
+    //  A small panel that appears under the MASTER button holding the two
+    //  global knobs. It is a child component, not a modal window and not an OS
+    //  dialog: automation keeps updating the knobs whether it is open or not,
+    //  because the attachments live for as long as the drawer object does.
+    class TopBar::MasterDrawer : public juce::Component
+    {
+    public:
+        MasterDrawer (juce::AudioProcessorValueTreeState& state)
+        {
+            drive = std::make_unique<Knob> (state, param::globalDrive, "GLOBAL DRIVE",
+                                            tokens::bandLow.withMultipliedSaturation (0.75f),
+                                            Knob::Size::medium,
+                                            "Scales all four band drives around their settings.");
+            tone = std::make_unique<Knob> (state, param::globalTone, "GLOBAL TONE",
+                                           tokens::neutralArcII, Knob::Size::medium,
+                                           "Overall tilt around 800 Hz.");
+            addAndMakeVisible (*drive);
+            addAndMakeVisible (*tone);
+            setAlwaysOnTop (true);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+            paint::dropShadow (g, bounds, metric::corner, 12.0f, 0.58f);
+            g.setColour (tokens::panelRaised);
+            g.fillRoundedRectangle (bounds, metric::corner);
+            g.setColour (tokens::borderHover);
+            g.drawRoundedRectangle (bounds, metric::corner, 1.0f);
+
+            g.setFont (captionFont (10.0f));
+            g.setColour (tokens::textMuted);
+            g.drawText ("MASTER", getLocalBounds().withHeight (16),
+                        juce::Justification::centred);
+        }
+
+        void resized() override
+        {
+            auto area = getLocalBounds().reduced (10, 6).withTrimmedTop (12);
+            const int w = area.getWidth() / 2;
+            drive->setBounds (area.removeFromLeft (w));
+            tone->setBounds (area);
+        }
+
+    private:
+        std::unique_ptr<Knob> drive, tone;
+    };
+
     TopBar::TopBar (FourColorProcessor& processor)
         : proc (processor)
     {
+        masterButton.setTooltip ("Global Drive and Global Tone");
+        masterButton.onClick = [this] { toggleMasterDrawer(); };
+        masterButton.setColour (juce::TextButton::buttonColourId, tokens::globalBack);
+        addAndMakeVisible (masterButton);
+
         prevButton = std::make_unique<juce::ArrowButton> ("prev", 0.5f, tokens::textSecondary);
         nextButton = std::make_unique<juce::ArrowButton> ("next", 0.0f, tokens::textSecondary);
         prevButton->setTooltip ("Previous preset");
@@ -164,6 +217,33 @@ namespace fourcolor::ui
         }
 
         undoButton->setEnabled (proc.undoManager.canUndo());
+    }
+
+    void TopBar::toggleMasterDrawer()
+    {
+        if (masterDrawer != nullptr)
+        {
+            masterDrawer.reset();
+            return;
+        }
+
+        auto* parent = getParentComponent();
+        if (parent == nullptr)
+            return;
+
+        masterDrawer = std::make_unique<MasterDrawer> (proc.apvts);
+        parent->addAndMakeVisible (*masterDrawer);
+
+        const auto anchor = parent->getLocalPoint (this, masterButton.getBounds().getBottomLeft());
+        auto bounds = juce::Rectangle<int> (anchor.x - 130, anchor.y + 6, 240, 96);
+        bounds.setX (juce::jlimit (8, juce::jmax (8, parent->getWidth() - bounds.getWidth() - 8),
+                                   bounds.getX()));
+        masterDrawer->setBounds (bounds);
+    }
+
+    void TopBar::closeMasterDrawer()
+    {
+        masterDrawer.reset();
     }
 
     void TopBar::showPresetMenu()
@@ -279,6 +359,8 @@ namespace fourcolor::ui
         powerButton->setBounds (area.removeFromRight (34));
         area.removeFromRight (10);
         qualityBox.setBounds (area.removeFromRight (112));
+        area.removeFromRight (8);
+        masterButton.setBounds (area.removeFromRight (74).reduced (0, 5));
         area.removeFromRight (12);
 
         //  Preset browser is ~26% of the window and stays centred; A/B and undo

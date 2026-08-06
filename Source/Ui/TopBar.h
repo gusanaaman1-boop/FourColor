@@ -7,6 +7,7 @@
 
 #include "../Core/ParameterIds.h"
 #include "Design.h"
+#include "Knob.h"
 
 namespace fourcolor
 {
@@ -26,11 +27,19 @@ namespace fourcolor::ui
 
     private:
         class PowerButton;
+        class MasterDrawer;
         class UndoButton;
         class PresetField;
 
         void timerCallback() override;
         void showPresetMenu();
+        void toggleMasterDrawer();
+
+    public:
+        //  Closed when the user clicks elsewhere or presses Escape.
+        void closeMasterDrawer();
+
+    private:
 
         FourColorProcessor& proc;
 
@@ -38,6 +47,9 @@ namespace fourcolor::ui
         std::unique_ptr<PresetField> presetField;
         juce::TextButton aButton { "A" }, bButton { "B" };
         std::unique_ptr<UndoButton> undoButton;
+        juce::TextButton masterButton { "MASTER" };
+        std::unique_ptr<MasterDrawer> masterDrawer;
+
         juce::ComboBox qualityBox;
         std::unique_ptr<PowerButton> powerButton;
 

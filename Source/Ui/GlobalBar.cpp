@@ -44,22 +44,14 @@ namespace fourcolor::ui
     {
         auto& apvts = proc.apvts;
 
-        input = std::make_unique<Knob> (apvts, param::input, "INPUT",
-                                        tokens::neutralArcII, Knob::Size::medium, "Input trim");
-        globalDrive = std::make_unique<Knob> (apvts, param::globalDrive, "GLOBAL DRIVE",
-                                              tokens::bandLow.withMultipliedSaturation (0.75f),
-                                              Knob::Size::medium,
-                                              "Scales all four band drives around their settings");
-        globalTone = std::make_unique<Knob> (apvts, param::globalTone, "GLOBAL TONE",
-                                             tokens::neutralArcII, Knob::Size::medium,
-                                             "Overall tilt around 800 Hz");
-        mix = std::make_unique<Knob> (apvts, param::mix, "MIX",
+        mix = std::make_unique<Knob> (apvts, param::mix, "MASTER MIX",
                                       tokens::neutralArc, Knob::Size::medium,
-                                      "Latency-aligned dry/wet");
+                                      "Latency-aligned dry/wet across the whole plug-in.");
         output = std::make_unique<Knob> (apvts, param::output, "OUTPUT",
-                                         tokens::neutralArcII, Knob::Size::medium, "Output trim");
+                                         tokens::neutralArcII, Knob::Size::medium,
+                                         "Final level leaving the plugin.");
 
-        for (auto* k : { input.get(), globalDrive.get(), globalTone.get(), mix.get(), output.get() })
+        for (auto* k : { mix.get(), output.get() })
             addAndMakeVisible (*k);
 
         autoLevelButton = std::make_unique<RoundToggle>();
@@ -68,81 +60,9 @@ namespace fourcolor::ui
         autoLevelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
             apvts, param::autoLevel, *autoLevelButton);
 
-        startTimerHz (30);
     }
 
     GlobalBar::~GlobalBar() = default;
-
-    void GlobalBar::timerCallback()
-    {
-        auto update = [] (float& level, float& hold, int& age, float peak)
-        {
-            level = juce::jmax (peak, level * 0.82f);       // smooth visual release
-            if (peak >= hold) { hold = peak; age = 0; }
-            else if (++age > 24) hold = juce::jmax (level, hold * 0.90f);
-        };
-
-        for (int c = 0; c < 2; ++c)
-        {
-            update (inLevel[c], inPeakHold[c], inPeakAge[c], proc.readAndResetInputPeak (c));
-            update (outLevel[c], outPeakHold[c], outPeakAge[c], proc.readAndResetOutputPeak (c));
-        }
-
-        repaint (inMeter.getSmallestIntegerContainer().expanded (10, 2));
-        repaint (outMeter.getSmallestIntegerContainer().expanded (10, 2));
-    }
-
-    void GlobalBar::drawStereoMeter (juce::Graphics& g, juce::Rectangle<float> area,
-                                     const float* levels, const float* peaks) const
-    {
-        auto labels = area.removeFromBottom (11.0f);
-        const float barW = 6.0f;
-        const float gap = 4.0f;
-        const float totalW = barW * 2.0f + gap;
-        auto bars = area.withWidth (totalW).withX (area.getCentreX() - totalW * 0.5f);
-
-        constexpr int segments = 22;
-
-        for (int c = 0; c < 2; ++c)
-        {
-            auto bar = bars.removeFromLeft (barW);
-            if (c == 0) bars.removeFromLeft (gap);
-
-            g.setColour (tokens::analyzerBack);
-            g.fillRoundedRectangle (bar, 2.0f);
-
-            const float db = juce::Decibels::gainToDecibels (levels[c], -60.0f);
-            const int lit = juce::roundToInt (juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f) * segments);
-
-            for (int s = 0; s < segments; ++s)
-            {
-                const float t = (float) s / (segments - 1);
-                const auto c0 = t > 0.93f ? tokens::meterPeak
-                              : t > 0.80f ? tokens::meterHigh
-                              : t > 0.58f ? tokens::meterMid
-                                          : tokens::meterLow;
-                const float sy = bar.getBottom() - bar.getHeight() * (float) (s + 1) / segments;
-                g.setColour (s < lit ? c0 : c0.withAlpha (0.13f));
-                g.fillRect (bar.getX(), sy + 0.8f, bar.getWidth(),
-                            bar.getHeight() / segments - 1.6f);
-            }
-
-            //  Short peak hold.
-            const float pdb = juce::Decibels::gainToDecibels (peaks[c], -60.0f);
-            if (pdb > -59.0f)
-            {
-                const float pt = juce::jlimit (0.0f, 1.0f, (pdb + 60.0f) / 60.0f);
-                const float py = bar.getBottom() - bar.getHeight() * pt;
-                g.setColour (pt > 0.93f ? tokens::meterPeak : tokens::textPrimary.withAlpha (0.75f));
-                g.fillRect (bar.getX(), py - 1.0f, bar.getWidth(), 1.6f);
-            }
-        }
-
-        g.setFont (uiFont (9.0f));
-        g.setColour (tokens::textMuted);
-        g.drawText ("L", labels.removeFromLeft (labels.getWidth() * 0.5f), juce::Justification::centred);
-        g.drawText ("R", labels, juce::Justification::centred);
-    }
 
     void GlobalBar::paint (juce::Graphics& g)
     {
@@ -160,9 +80,6 @@ namespace fourcolor::ui
             g.fillRect ((float) x, bounds.getY() + 14.0f, 1.0f, bounds.getHeight() - 28.0f);
         }
 
-        drawStereoMeter (g, inMeter, inLevel, inPeakHold);
-        drawStereoMeter (g, outMeter, outLevel, outPeakHold);
-
         g.setFont (captionFont (11.5f));
         g.setColour (tokens::textSecondary);
         g.drawText ("AUTO LEVEL",
@@ -173,36 +90,23 @@ namespace fourcolor::ui
 
     void GlobalBar::resized()
     {
-        auto area = getLocalBounds().reduced (12, 9);
+        auto area = getLocalBounds().reduced (14, 9);
         separatorX.clear();
 
-        inMeter = area.removeFromLeft (26).toFloat().reduced (0.0f, 6.0f);
-        area.removeFromLeft (6);
-        outMeter = area.removeFromRight (26).toFloat().reduced (0.0f, 6.0f);
-        area.removeFromRight (6);
-
-        //  Six equal groups: INPUT | GLOBAL DRIVE | AUTO LEVEL | GLOBAL TONE |
-        //  MIX | OUTPUT.
-        const int groups = 6;
+        //  Three groups only. The meters are no longer here - they flank the
+        //  analyzer, next to their own trims.
+        const int groups = 3;
         const int gw = area.getWidth() / groups;
 
         auto place = [] (Knob& k, juce::Rectangle<int> cell)
         {
-            const int w = juce::jmin (cell.getWidth(), 104);
+            const int w = juce::jmin (cell.getWidth(), 112);
             k.setBounds (cell.withSizeKeepingCentre (w, cell.getHeight()));
         };
 
-        place (*input, area.removeFromLeft (gw));
-        separatorX.push_back (area.getX());
-        place (*globalDrive, area.removeFromLeft (gw));
-
-        separatorX.push_back (area.getX());
-        auto middle = area.removeFromLeft (gw);
-        autoLevelButton->setBounds (middle.withSizeKeepingCentre (46, 46)
-                                          .withY (middle.getY() + 26));
-
-        separatorX.push_back (area.getX());
-        place (*globalTone, area.removeFromLeft (gw));
+        auto first = area.removeFromLeft (gw);
+        autoLevelButton->setBounds (first.withSizeKeepingCentre (48, 48)
+                                         .withY (first.getY() + 26));
 
         separatorX.push_back (area.getX());
         place (*mix, area.removeFromLeft (gw));

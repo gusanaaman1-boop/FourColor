@@ -95,6 +95,7 @@ set(FOURCOLOR_CORE_SOURCES
     Source/Ui/BandStrip.cpp
     Source/Ui/GlobalBar.cpp
     Source/Ui/Knob.cpp
+    Source/Ui/MeterColumn.cpp
     Source/Ui/Theme.cpp
     Source/Ui/TopBar.cpp
     Source/PluginEditor.cpp

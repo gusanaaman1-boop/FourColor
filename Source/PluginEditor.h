@@ -7,6 +7,7 @@
 #include "Ui/BandHeaders.h"
 #include "Ui/BandStrip.h"
 #include "Ui/GlobalBar.h"
+#include "Ui/MeterColumn.h"
 #include "Ui/Theme.h"
 #include "Ui/TopBar.h"
 
@@ -26,6 +27,8 @@ namespace fourcolor
 
         void paint (juce::Graphics&) override;
         void resized() override;
+        bool keyPressed (const juce::KeyPress&) override;
+        void mouseDown (const juce::MouseEvent&) override;
 
         //  QA affordance for the screenshot tool: render the real hover/drag
         //  styling of one selected-band control without synthesising events.
@@ -43,6 +46,8 @@ namespace fourcolor
         ui::Analyzer analyzer { proc };
         ui::BandHeaders bandHeaders { proc };
         ui::BandStrip bandStrip { proc.apvts };
+        ui::MeterColumn inputMeter { proc, ui::MeterColumn::Side::input };
+        ui::MeterColumn outputMeter { proc, ui::MeterColumn::Side::output };
         ui::GlobalBar globalBar { proc };
         juce::TooltipWindow tooltips { this, 550 };
 

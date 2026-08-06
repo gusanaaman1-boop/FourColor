@@ -50,7 +50,7 @@ namespace fourcolor::ui
         behaviorSlider.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
         //  The value must never jump to the click position on mouse-down.
         behaviorSlider.setSliderSnapsToMousePosition (false);
-        behaviorSlider.setTooltip ("Shift saturation response between body and transients");
+        behaviorSlider.setTooltip ("BODY lifts low-level body into the colour engine without boosting silence. ATTACK drives transients harder into it.");
         behaviorSlider.setVelocityModeParameters (1.0, 1, 0.08, true,
                                                   juce::ModifierKeys::ctrlModifier);
         behaviorSlider.onDragStart = [this]
@@ -235,7 +235,7 @@ namespace fourcolor::ui
         {
             g.setFont (captionFont (11.5f));
             g.setColour (tokens::textSecondary);
-            g.drawText ("BEHAVIOR", behaviorArea.withHeight (18), juce::Justification::centred);
+            g.drawText ("SHAPE", behaviorArea.withHeight (18), juce::Justification::centred);
 
             const auto sb = behaviorSlider.getBounds();
             const double value = behaviorSlider.getValue();

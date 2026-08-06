@@ -1,6 +1,8 @@
 // The selected band's panel. Left to right, with the width proportions from
 // the specification: COLOR list 15% | DRIVE 17% | BEHAVIOR 31% | TONE 13% |
 // SPACE / SPREAD 13% | divider | MIX + LEVEL 9%.
+// The BEHAVIOR control is labelled SHAPE: the parameter ID and range are
+// unchanged, but since the rework its two sides are two different mechanisms.
 //
 // The hierarchy is deliberate: DRIVE is the largest control, BEHAVIOR owns the
 // centre, SPACE and TONE are medium, MIX and LEVEL are small and set apart.

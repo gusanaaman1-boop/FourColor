@@ -216,13 +216,16 @@ namespace fourcolor::ui
 
             //  Buttons on the right, 24 px hit targets as the brief requires,
             //  in the same order in every band.
-            auto buttons = area.removeFromRight (juce::jmin (area.getWidth(), 78));
-            const int size = juce::jmin (24, buttons.getHeight());
+            const int size = juce::jmin (22, area.getHeight());
+            const int stripW = juce::jmin (area.getWidth(), size * 3 + 8);
+            auto buttons = area.removeFromRight (stripW);
 
             auto place = [&buttons, size] (juce::Component& c)
             {
-                c.setBounds (buttons.removeFromLeft (size + 2)
-                                 .withSizeKeepingCentre (size, size));
+                //  24 px minimum hit target even though the icon is smaller.
+                auto cell = buttons.removeFromLeft (juce::jmax (size, buttons.getWidth() / 3));
+                c.setBounds (cell.withSizeKeepingCentre (juce::jmax (24, size),
+                                                         juce::jmax (24, cell.getHeight())));
             };
 
             place (*bands[b].power);
@@ -263,7 +266,8 @@ namespace fourcolor::ui
             //  Caption: BAND . COLOUR . DRIVE, dropped progressively as the
             //  header narrows rather than squashed.
             auto text = area.reduced (7.0f, 0.0f);
-            text = text.withTrimmedRight (82.0f);
+            const float buttonStrip = juce::jmin (area.getWidth() * 0.5f, 82.0f);
+            text = text.withTrimmedRight (buttonStrip);
 
             const auto nameColour = tokens::textPrimary
                                         .interpolatedWith (accent, 0.55f * lit)
@@ -279,11 +283,11 @@ namespace fourcolor::ui
             g.setColour (nameColour);
             g.drawText (caption, text, juce::Justification::centredLeft, false);
 
-            auto rest = text.withTrimmedLeft (nameWidth + 8.0f);
-            if (rest.getWidth() > 40.0f)
+            auto rest = text.withTrimmedLeft (nameWidth + 7.0f);
+            if (rest.getWidth() > 26.0f)
             {
                 juce::String detail = juce::String (juce::CharPointer_UTF8 ("\xc2\xb7 ")) + colourText;
-                if (rest.getWidth() > 96.0f)
+                if (rest.getWidth() > 74.0f)
                     detail << juce::String (juce::CharPointer_UTF8 (" \xc2\xb7 "))
                            << juce::String (juce::roundToInt (band.drivePercent)) << "%";
 

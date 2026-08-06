@@ -8,7 +8,9 @@ namespace fourcolor
         setLookAndFeel (&laf);
 
         addAndMakeVisible (topBar);
+        addAndMakeVisible (inputMeter);
         addAndMakeVisible (analyzer);
+        addAndMakeVisible (outputMeter);
         addAndMakeVisible (bandHeaders);
         addAndMakeVisible (bandStrip);
         addAndMakeVisible (globalBar);
@@ -36,6 +38,7 @@ namespace fourcolor
         const int h = (int) proc.apvts.state.getProperty ("editorHeight", 620);
         setSize (juce::jlimit (900, 1900, w), juce::jlimit (560, 1200, h));
 
+        setWantsKeyboardFocus (true);
         startTimerHz (12);
     }
 
@@ -67,6 +70,23 @@ namespace fourcolor
         bandStrip.setEnergy (juce::jlimit (0.0f, 1.0f, peak * 1.6f));
     }
 
+    bool FourColorEditor::keyPressed (const juce::KeyPress& key)
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            topBar.closeMasterDrawer();
+            return true;
+        }
+        return false;
+    }
+
+    void FourColorEditor::mouseDown (const juce::MouseEvent&)
+    {
+        //  A click that reaches the editor itself landed outside every child,
+        //  which includes outside the drawer.
+        topBar.closeMasterDrawer();
+    }
+
     void FourColorEditor::paint (juce::Graphics& g)
     {
         //  Ground: a very slight vertical lift towards the top bar.
@@ -94,8 +114,23 @@ namespace fourcolor
         };
 
         topBar.setBounds (0, 0, getWidth(), juce::roundToInt (h * topBarBottom));
-        bandHeaders.setBounds (rowBetween (headersTop, headersBottom));
-        analyzer.setBounds (rowBetween (analyzerTop, analyzerBottom));
+
+        //  Meters flank the analyzer, each with its own trim beneath it, so the
+        //  reading and the control that moves it are one object. The headers
+        //  align to the analyzer's plot area, so both are inset by the same
+        //  meter width.
+        const int meterW = juce::jlimit (54, 76, juce::roundToInt (w * 0.062f));
+        auto headerRow = rowBetween (headersTop, headersBottom);
+        auto plotRow = rowBetween (analyzerTop, analyzerBottom);
+
+        auto meterSpan = plotRow.getUnion (headerRow);
+        inputMeter.setBounds (meterSpan.removeFromLeft (meterW));
+        outputMeter.setBounds (meterSpan.removeFromRight (meterW));
+
+        bandHeaders.setBounds (headerRow.withTrimmedLeft (meterW + 6)
+                                        .withTrimmedRight (meterW + 6));
+        analyzer.setBounds (plotRow.withTrimmedLeft (meterW + 6)
+                                   .withTrimmedRight (meterW + 6));
         bandStrip.setBounds (rowBetween (panelTop, panelBottom));
         globalBar.setBounds (rowBetween (globalTop, 1.0f).withTrimmedBottom (margin / 2));
     }
