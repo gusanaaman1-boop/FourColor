@@ -1,0 +1,32 @@
+idx  preset                       category     drive    rms dB   peak dB          dc
+0    Default                      Init         25.0%   -14.378    -3.272  -0.0005707
+1    Sub Weight                   Bass         48.0%   -14.218    -4.166  -0.0002210
+2    Rolling Bass Body            Bass         55.0%   -14.360    -4.162  -0.0005490
+3    Acid Bite                    Bass         68.0%   -13.324    -2.838  -0.0003468
+4    Mid Bass Iron                Bass         62.0%   -14.146    -3.491  -0.0005685
+5    Bass Harmonic Lift           Bass         38.0%   -14.270    -0.460   0.0030157
+6    Controlled Bass Fuzz         Bass         48.0%   -14.039    -3.945  -0.0005768
+7    Kick Weight                  Drums        58.0%   -14.248    -3.958  -0.0004034
+8    Kick Attack                  Drums        55.0%   -14.025    -2.632  -0.0004083
+9    Drum Bus Warmth              Drums        36.0%   -14.156    -3.129  -0.0001375
+10   Crunchy Loop                 Drums        60.0%   -14.579    -1.593  -0.0004811
+11   Snare Bite                   Drums        68.0%   -14.469    -1.568  -0.0004294
+12   Parallel Fuzz Drums          Drums        72.0%   -14.964    -1.693   0.0019920
+13   Warm Pad                     Synths       35.0%   -13.930    -3.372  -0.0005941
+14   Dirty Pad Halo               Synths       52.0%   -14.368    -2.317  -0.0005392
+15   Melodic Lead Bite            Synths       62.0%   -14.474    -1.649  -0.0004589
+16   Dark Stab Iron               Synths       64.0%   -13.714    -2.944  -0.0006211
+17   Acid Destruction             Synths       85.0%   -13.983    -2.482  -0.0001394
+18   Upper Harmonic Lift          Synths       42.0%   -14.397    -0.174   0.0031212
+19   Vocal Edge                   Vocals       46.0%   -14.380    -2.058  -0.0005269
+20   Dark Vocal Grit              Vocals       56.0%   -14.333    -3.074  -0.0005648
+21   Harmonic Air                 Vocals       34.0%   -14.511     0.067   0.0030803
+22   Telephone Fuzz               Vocals       70.0%   -16.894    -5.250   0.0000862
+23   Gentle Four-Band Glue        Mix          22.0%   -14.234    -2.178   0.0004573
+24   Low-End Safe Saturation      Mix          36.0%   -14.340    -0.402   0.0030312
+25   Brightness Without EQ        Mix          38.0%   -14.584    -1.821  -0.0005058
+26   Parallel Color               Mix          55.0%   -14.510    -1.799   0.0016415
+27   BASS - Body Lift             Shape        55.0%   -13.605    -4.401  -0.0005973
+28   808 - Body Sustain           Shape        62.0%   -13.663    -4.025  -0.0002834
+29   KICK - Attack Color          Shape        58.0%   -14.016    -2.893  -0.0004010
+30   MELODY - Attack Bite         Shape        62.0%   -14.104    -2.040  -0.0003331
