@@ -18,27 +18,27 @@ namespace fourcolor::ui
 
         drive = std::make_unique<Knob> (state, param::band (0, param::drive), "DRIVE",
                                         accent, Knob::Size::large,
-                                        "Amount of harmonic saturation");
+                                        "Amount of harmonic saturation.");
         drive->setSparks (true);
         drive->setGlow (0.18f);
 
         tone = std::make_unique<Knob> (state, param::band (0, param::tone), "TONE",
                                        tokens::bandHiMid.withSaturation (0.45f), Knob::Size::medium,
-                                       "Shape harmonic darkness or brightness");
+                                       "Shape harmonic darkness or brightness.");
         tone->setSideCaptions ("DARK", "BRIGHT");
 
         space = std::make_unique<Knob> (state, param::band (0, param::space), "SPACE / SPREAD",
                                         tokens::bandHigh, Knob::Size::medium,
-                                        "Widen and diffuse generated harmonics");
+                                        "Widen and diffuse generated harmonics.");
         space->setSpreadArcs (true);
         space->setGlow (0.15f);
 
         bandMix = std::make_unique<Knob> (state, param::band (0, param::bandMix), "MIX",
                                           tokens::neutralArc, Knob::Size::small,
-                                          "Blend processed and clean band");
+                                          "Blend processed and clean band.");
         level = std::make_unique<Knob> (state, param::band (0, param::level), "LEVEL",
                                         tokens::neutralArcII, Knob::Size::small,
-                                        "Band output level");
+                                        "Band output level.");
 
         for (auto* k : { drive.get(), tone.get(), space.get(), bandMix.get(), level.get() })
         {

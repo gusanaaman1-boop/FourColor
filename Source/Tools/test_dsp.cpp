@@ -1720,6 +1720,175 @@ static void testBehaviorAttackVsBody()
 }
 
 // ================================================================================
+//  Phase 7: all sixteen band-power masks
+// ================================================================================
+static void testAllBandPowerMasks()
+{
+    section ("Phase 7: every combination of band Power reconstructs cleanly");
+
+    const double sr = 48000.0;
+    const int block = 256;
+    const int blocks = 200;
+
+    //  Broadband so a hole anywhere in the spectrum shows up.
+    auto source = [sr] (int n)
+    {
+        double v = 0.0;
+        for (double f : { 45.0, 90.0, 180.0, 400.0, 900.0, 2000.0, 4500.0, 9000.0, 15000.0 })
+            v += 0.09 * std::sin (2.0 * MathConstants<double>::pi * f * n / sr);
+        return (float) v;
+    };
+
+    auto render = [&] (int mask, bool measureOnly)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        for (int b = 0; b < numBands; ++b)
+        {
+            p.bands[b].color = (ColorType) b;
+            p.bands[b].drive = 65.0f;
+            p.bands[b].space = 0.0f;
+            //  Bit set means POWERED. Power off is bypass true.
+            p.bands[b].bypass = ((mask >> b) & 1) == 0;
+        }
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        std::vector<float> out;
+        int n = 0;
+
+        for (int blk = 0; blk < blocks; ++blk)
+        {
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++n)
+                d[i] = source (n);
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (blk > 60 || ! measureOnly)
+                for (int i = 0; i < block; ++i)
+                    out.push_back (io.getSample (0, i));
+        }
+        return out;
+    };
+
+    //  1. Every mask stays finite, and none of them puts a hole in the
+    //     spectrum: each probe frequency must still be present.
+    int worstMissing = -1;
+    double worstMissingDb = 0.0;
+    bool allFinite = true;
+
+    const double probes[] = { 45.0, 180.0, 900.0, 4500.0, 15000.0 };
+
+    for (int mask = 0; mask < 16; ++mask)
+    {
+        const auto out = render (mask, true);
+        for (auto v : out)
+            allFinite = allFinite && std::isfinite (v);
+
+        for (double f : probes)
+        {
+            const double level = goertzel (out.data(), (int) out.size(), f, sr);
+            const double db = Decibels::gainToDecibels (level / 0.09, -200.0);
+            if (db < -12.0 && db < worstMissingDb)
+            {
+                worstMissingDb = db;
+                worstMissing = mask;
+            }
+        }
+    }
+
+    check (allFinite, "all 16 band-power masks stay finite");
+    check (worstMissing < 0,
+           worstMissing < 0
+               ? String ("no band-power mask puts a hole in the spectrum")
+               : "no band-power mask puts a hole in the spectrum (mask "
+                     + String (worstMissing) + " lost " + String (worstMissingDb, 1) + " dB)");
+
+    //  2. All four powered off must leave the signal uncoloured. The check is
+    //     on MAGNITUDE, not on samples: four bypassed bands sum to the
+    //     crossover's ALLPASS, which is flat but phase-shifted, so the output
+    //     is deliberately not a copy of the input. That is the same reason the
+    //     Mix leg is aligned against the allpass reference rather than the dry.
+    {
+        const auto allOff = render (0, true);
+
+        double worstDb = 0.0;
+        for (double f : probes)
+        {
+            const double level = goertzel (allOff.data(), (int) allOff.size(), f, sr);
+            const double db = Decibels::gainToDecibels (level / 0.09, -200.0);
+            worstDb = jmax (worstDb, std::abs (db));
+        }
+
+        std::printf ("      all four powered off: worst deviation %.3f dB across the spectrum\n",
+                     worstDb);
+        check (worstDb < 0.5,
+               "all four bands powered off leaves the spectrum uncoloured ("
+                   + String (worstDb, 3) + " dB)");
+    }
+
+    //  3. Toggling Power mid-stream must not step the output.
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        for (auto& b : p.bands) { b.drive = 65.0f; b.space = 0.0f; }
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        std::vector<float> out;
+        int n = 0;
+
+        for (int blk = 0; blk < 300; ++blk)
+        {
+            //  Power band 2 off at 100, back on at 200.
+            p.bands[1].bypass = blk >= 100 && blk < 200;
+            engine.setParameters (p);
+
+            auto* d = io.getWritePointer (0);
+            for (int i = 0; i < block; ++i, ++n)
+                d[i] = source (n);
+            engine.process (io);
+
+            for (int i = 0; i < block; ++i)
+                out.push_back (io.getSample (0, i));
+        }
+
+        auto worstStepIn = [&out] (size_t first, size_t last)
+        {
+            double worst = 0.0;
+            const size_t lo = first < 1 ? size_t (1) : first;
+            const size_t hi = last < out.size() ? last : out.size();
+            for (size_t i = lo; i < hi; ++i)
+                worst = jmax (worst, std::abs ((double) out[i] - out[i - 1]));
+            return worst;
+        };
+
+        const auto win = (size_t) (0.1 * sr);
+        const double atToggle = jmax (worstStepIn ((size_t) (100 * block), (size_t) (100 * block) + win),
+                                      worstStepIn ((size_t) (200 * block), (size_t) (200 * block) + win));
+        const double baseline = worstStepIn ((size_t) (40 * block), (size_t) (40 * block) + win);
+
+        //  This source is nine summed sines and steps 0.365 FS by itself, so
+        //  an absolute 0.02 FS budget cannot say anything about it - the same
+        //  trap the pink-noise and gated-FUZZ checks fell into. What matters is
+        //  whether the toggle adds a step the material did not already have.
+        std::printf ("      Power toggled mid-stream: worst step %.5f FS"
+                     " (same material elsewhere %.5f)\n", atToggle, baseline);
+        check (atToggle <= baseline * 1.05,
+               "toggling band Power adds no step the material did not have ("
+                   + String (atToggle, 5) + " vs " + String (baseline, 5) + ")");
+    }
+}
+
+// ================================================================================
 //  Phase 3: BODY is upward density, and it does not lift silence
 // ================================================================================
 namespace
@@ -4414,6 +4583,7 @@ int main()
     testQualitySwitchIsSeamless();
 
     testBehaviorAttackVsBody();
+    testAllBandPowerMasks();
     testBodyIsUpwardDensity();
     testBodyDoesNotLiftNoiseFloor();
     testBehaviorNoPumpingOnSustained();

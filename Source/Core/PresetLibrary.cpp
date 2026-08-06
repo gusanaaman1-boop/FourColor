@@ -302,6 +302,52 @@ namespace fourcolor
                 band (v, 3, ColorType::warm, 35.0f, 0.0f, 12.0f);
             });
 
+            //  --- SHAPE demonstrations ------------------------------------
+            //  Four presets whose only job is to make the two sides of SHAPE
+            //  obvious on the material each side is for. Deliberately plain
+            //  otherwise: no Space, no crossover moves, so the only thing to
+            //  listen to is the axis.
+            add ("BASS - Body Lift", "Shape", [] (V& v)
+            {
+                //  Full BODY on the two bands a bass line lives in: the note's
+                //  decay gets colour it was not getting, the pluck stays put.
+                band (v, 0, ColorType::warm, 55.0f, -100.0f);
+                band (v, 1, ColorType::warm, 48.0f, -85.0f);
+                band (v, 2, ColorType::iron, 25.0f, -40.0f);
+                band (v, 3, ColorType::warm, 12.0f);
+            });
+
+            add ("808 - Body Sustain", "Shape", [] (V& v)
+            {
+                //  An 808 is mostly tail. BODY on the low band with the tone
+                //  left alone, so the long part thickens without the attack
+                //  changing character.
+                v.emplace_back (p::xover1, 95.0f);
+                band (v, 0, ColorType::warm, 62.0f, -100.0f);
+                band (v, 1, ColorType::iron, 40.0f, -70.0f);
+                band (v, 2, ColorType::warm, 18.0f);
+                band (v, 3, ColorType::warm, 10.0f);
+            });
+
+            add ("KICK - Attack Color", "Shape", [] (V& v)
+            {
+                //  The mirror: ATTACK on the bands that carry a kick's click,
+                //  so the hit gets crunch and the body stays clean.
+                band (v, 0, ColorType::iron, 45.0f, 55.0f);
+                band (v, 1, ColorType::bite, 52.0f, 85.0f);
+                band (v, 2, ColorType::bite, 58.0f, 100.0f);
+                band (v, 3, ColorType::bite, 40.0f, 80.0f);
+            });
+
+            add ("MELODY - Attack Bite", "Shape", [] (V& v)
+            {
+                //  Plucked material: full ATTACK where the pick lives.
+                band (v, 0, ColorType::warm, 20.0f);
+                band (v, 1, ColorType::bite, 45.0f, 70.0f);
+                band (v, 2, ColorType::bite, 62.0f, 100.0f, 15.0f);
+                band (v, 3, ColorType::bite, 50.0f, 90.0f, 10.0f);
+            });
+
             return out;
         }();
 
