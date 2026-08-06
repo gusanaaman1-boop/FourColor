@@ -17,6 +17,7 @@
 #include "../Core/ParameterIds.h"
 #include "../Core/PresetLibrary.h"
 #include "../Core/StateMigration.h"
+#include "../Ui/Analyzer.h"
 #include "../Dsp/ColorEngine.h"
 #include "../Dsp/Crossover.h"
 #include "../Dsp/AutoLevel.h"
@@ -3912,11 +3913,11 @@ static void testAnalyzerCpu()
     const double analyzerMs = fc != nullptr ? measure (fc->getAnalyzer()) : 0.0;
     const double wholeMs = measure (*editor);
 
-    const double analyzerLoad = analyzerMs * 36.0 / 1000.0 * 100.0;
-    const double wholeLoad = wholeMs * 36.0 / 1000.0 * 100.0;
+    const double analyzerLoad = analyzerMs * (double) ui::Analyzer::analyzerFps / 1000.0 * 100.0;
+    const double wholeLoad = wholeMs * (double) ui::Analyzer::analyzerFps / 1000.0 * 100.0;
 
-    std::printf ("      analyzer only : %.2f ms/frame -> %.1f%% of one core at 36 FPS\n",
-                 analyzerMs, analyzerLoad);
+    std::printf ("      analyzer only : %.2f ms/frame -> %.1f%% of one core at %d FPS\n",
+                 analyzerMs, analyzerLoad, ui::Analyzer::analyzerFps);
     std::printf ("      whole editor  : %.2f ms/frame -> %.1f%% of one core (worst case,\n"
                  "                      every surface forced to redraw each frame)\n",
                  wholeMs, wholeLoad);

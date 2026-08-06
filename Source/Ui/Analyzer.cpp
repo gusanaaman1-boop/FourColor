@@ -50,7 +50,11 @@ namespace fourcolor::ui
         }
 
         //  36 FPS: within the 30-45 band the specification asks for.
-        startTimerHz (36);
+        //  30 FPS, the bottom of the brief's 30-45 range. The analyzer grew
+        //  from 29% of the window to 39.5% when the band cards were removed,
+        //  which is 36% more area to fill every frame; trading six frames a
+        //  second for that is a better answer than making the picture coarser.
+        startTimerHz (analyzerFps);
     }
 
     Analyzer::~Analyzer() = default;

@@ -34,6 +34,10 @@ namespace fourcolor::ui
     class Analyzer : public juce::Component, private juce::Timer
     {
     public:
+        //  Refresh rate, shared with the CPU test so both speak about the same
+        //  frame budget.
+        static constexpr int analyzerFps = 30;
+
         Analyzer (FourColorProcessor& processor);
         ~Analyzer() override;
 
