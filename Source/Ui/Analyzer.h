@@ -65,6 +65,25 @@ namespace fourcolor::ui
         void paint (juce::Graphics&) override;
         void resized() override;
 
+        //  Diagnostics only, for the editor-performance test: how many times
+        //  the timer has fired and how many times this component has actually
+        //  painted. Nothing in the plug-in reads them, and they are the only
+        //  way to distinguish "the analyzer redrew" from "the whole editor
+        //  redrew" without instrumenting JUCE itself.
+        struct Counters
+        {
+            std::atomic<int> timerTicks { 0 };
+            std::atomic<int> paints { 0 };
+
+            //  Timestamps taken INSIDE the timer callback. Sampling frame
+            //  intervals from an outer polling loop measures the poll interval
+            //  as much as the frame interval; this does not.
+            static constexpr int maxTickTimes = 2048;
+            double tickTimeMs[maxTickTimes] = {};
+            std::atomic<int> tickTimeCount { 0 };
+        };
+        Counters counters;
+
         void mouseDown (const juce::MouseEvent&) override;
         void mouseDrag (const juce::MouseEvent&) override;
         void mouseUp (const juce::MouseEvent&) override;

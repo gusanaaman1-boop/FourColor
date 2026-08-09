@@ -35,6 +35,19 @@ namespace fourcolor
         ui::BandStrip& getBandStrip() noexcept { return bandStrip; }
         ui::Analyzer& getAnalyzer() noexcept   { return analyzer; }
 
+        //  Diagnostics only: how many times the editor's own background has
+        //  repainted. Compared against the analyzer's count, this is what says
+        //  whether a steady playback frame redraws the analyzer alone or drags
+        //  the whole window with it.
+        std::atomic<int> backgroundPaints { 0 };
+
+        //  ...and how much of the window each of those paints actually covered.
+        //  A child that is not opaque makes its parent paint the background
+        //  behind it, so a per-frame CALL to the editor's paint() is expected
+        //  and says nothing. The clipped AREA is what distinguishes "repaint
+        //  the strip behind the analyzer" from "repaint the whole window".
+        std::atomic<long long> backgroundPaintArea { 0 };
+
     private:
         void timerCallback() override;
         void selectBand (int band);

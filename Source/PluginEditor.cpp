@@ -89,6 +89,11 @@ namespace fourcolor
 
     void FourColorEditor::paint (juce::Graphics& g)
     {
+        backgroundPaints.fetch_add (1, std::memory_order_relaxed);
+        backgroundPaintArea.fetch_add ((long long) g.getClipBounds().getWidth()
+                                           * g.getClipBounds().getHeight(),
+                                       std::memory_order_relaxed);
+
         //  Ground: a very slight vertical lift towards the top bar.
         juce::ColourGradient bg (ui::tokens::backgroundTop, 0.0f, 0.0f,
                                  ui::tokens::backgroundDeep, 0.0f, (float) getHeight(), false);

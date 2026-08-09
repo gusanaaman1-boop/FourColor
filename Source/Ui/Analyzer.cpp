@@ -88,11 +88,15 @@ namespace fourcolor::ui
     void Analyzer::updateSpectrum()
     {
         //  Drain the processor's mid/side tap into the rings.
+        int drained = 0;
+
         for (;;)
         {
             const int frames = proc.readSpectrumFrames (drain.data(), 2048);
             if (frames == 0)
                 break;
+
+            drained += frames;
 
             for (int i = 0; i < frames; ++i)
             {
@@ -103,6 +107,33 @@ namespace fourcolor::ui
         }
 
         const double sr = proc.getSampleRate() > 0.0 ? proc.getSampleRate() : 48000.0;
+
+        //  Nothing arrived this frame, so the transport is not running and the
+        //  host has stopped calling processBlock. The ring still holds the last
+        //  bar of audio, and without this the display would animate that stale
+        //  content for as long as the editor stayed open: it could never reach
+        //  its own silence test, so it never stopped repainting. Measured at
+        //  15% of one core on a window with the transport stopped.
+        //
+        //  Feed it the silence the transport is actually producing, one frame's
+        //  worth per frame, so a stopped transport decays exactly the way real
+        //  silence does.
+        if (drained == 0)
+        {
+            //  Already at rest, and nothing arrived to disturb it. Two 4096
+            //  point FFTs per frame to re-confirm a floor that cannot have
+            //  moved is the whole remaining cost of an idle window.
+            if (silent)
+                return;
+
+            const int quiet = juce::jmin (fftSize, (int) (sr / (double) analyzerFps));
+            for (int i = 0; i < quiet; ++i)
+            {
+                midRing[(size_t) ringPos]  = 0.0f;
+                sideRing[(size_t) ringPos] = 0.0f;
+                ringPos = (ringPos + 1) % fftSize;
+            }
+        }
         const double binHz = sr / fftSize;
 
         auto analyse = [&] (const std::vector<float>& ring, std::vector<float>& outDb,
@@ -178,6 +209,14 @@ namespace fourcolor::ui
 
     void Analyzer::timerCallback()
     {
+        counters.timerTicks.fetch_add (1, std::memory_order_relaxed);
+        if (const int slot = counters.tickTimeCount.load (std::memory_order_relaxed);
+            slot < Counters::maxTickTimes)
+        {
+            counters.tickTimeMs[slot] = juce::Time::getMillisecondCounterHiRes();
+            counters.tickTimeCount.store (slot + 1, std::memory_order_relaxed);
+        }
+
         const bool wasSilent = silent;
         updateSpectrum();
 
@@ -283,6 +322,8 @@ namespace fourcolor::ui
 
     void Analyzer::paint (juce::Graphics& g)
     {
+        counters.paints.fetch_add (1, std::memory_order_relaxed);
+
         const auto area = plotArea();
         const auto full = getLocalBounds().toFloat();
 

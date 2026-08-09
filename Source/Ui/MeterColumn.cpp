@@ -43,8 +43,15 @@ namespace fourcolor::ui
             const float peak = block.peak[c].exchange (0.0f);
             const float ms   = block.meanSquare[c].load (std::memory_order_relaxed);
 
-            const float peakDb = juce::Decibels::gainToDecibels (peak, -200.0f);
-            const float rmsDb  = juce::Decibels::gainToDecibels (std::sqrt (ms), -200.0f);
+            //  Clamped to the bottom of the scale, not to -200 dB. Nothing
+            //  below floorDb can be drawn, so letting the ballistics carry on
+            //  down to -200 only means the bars keep "moving" invisibly - the
+            //  peak decay alone took seven seconds to get there, and the meter
+            //  repainted all the way down.
+            const float peakDb = juce::jmax (floorDb,
+                                             juce::Decibels::gainToDecibels (peak, -200.0f));
+            const float rmsDb  = juce::jmax (floorDb,
+                                             juce::Decibels::gainToDecibels (std::sqrt (ms), -200.0f));
 
             //  Peak: instant attack, linear dB decay.
             ch.peakDb = peakDb > ch.peakDb ? peakDb
@@ -60,6 +67,20 @@ namespace fourcolor::ui
 
         if (block.clipped.load (std::memory_order_relaxed))
             clipped = true;
+
+        bool changed = clipped != drawnClipped;
+
+        for (int c = 0; c < 2 && ! changed; ++c)
+            changed = std::abs (channels[c].peakDb - drawn[c].peakDb) > visibleStepDb
+                   || std::abs (channels[c].rmsDb  - drawn[c].rmsDb)  > visibleStepDb
+                   || std::abs (channels[c].holdDb - drawn[c].holdDb) > visibleStepDb;
+
+        if (! changed)
+            return;
+
+        for (int c = 0; c < 2; ++c)
+            drawn[c] = { channels[c].peakDb, channels[c].rmsDb, channels[c].holdDb };
+        drawnClipped = clipped;
 
         repaint();
     }

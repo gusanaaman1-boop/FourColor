@@ -51,13 +51,28 @@ namespace fourcolor::ui
         //  Per channel, all GUI-side.
         struct Channel
         {
-            float peakDb = -200.0f;      // decayed peak bar
-            float rmsDb  = -200.0f;      // smoothed RMS bar
-            float holdDb = -200.0f;      // peak-hold tick
+            float peakDb = floorDb;      // decayed peak bar
+            float rmsDb  = floorDb;      // smoothed RMS bar
+            float holdDb = floorDb;      // peak-hold tick
             int   holdAge = 0;
         };
         Channel channels[2];
         bool clipped = false;
+
+        //  What the last repaint actually drew. The timer runs at a fixed rate
+        //  because the ballistics need a fixed clock, but a repaint is only
+        //  worth asking for when one of these has moved by something a pixel
+        //  could show. Without this the two meter columns repainted 30 times a
+        //  second for as long as the editor was open - with the transport
+        //  stopped and every bar resting on the floor - and dragged the
+        //  editor's background through it each time, which measured 15% of a
+        //  core on an idle window.
+        struct Drawn { float peakDb, rmsDb, holdDb; };
+        Drawn drawn[2] { { floorDb, floorDb, floorDb }, { floorDb, floorDb, floorDb } };
+        bool drawnClipped = false;
+
+        //  Half of the narrowest bar step this meter can resolve.
+        static constexpr float visibleStepDb = 0.05f;
 
         juce::Rectangle<int> barsArea, scaleArea, clipArea;
 

@@ -95,8 +95,12 @@ namespace fourcolor::ui
             band.mute  = std::make_unique<IconToggle> (IconToggle::Kind::mute, accent);
 
             band.power->setInverted (true);
-            band.power->setTooltip ("Bypasses colour processing for this band while keeping "
-                                    "the frequency range clean.");
+            //  The host calls this parameter "Bypass" and always will - the ID
+            //  is frozen and 31 presets depend on it. The tooltip is where the
+            //  two names are reconciled, so someone who finds "LOW Bypass" in
+            //  an automation lane knows which light it belongs to.
+            band.power->setTooltip ("Power Off bypasses colour processing while this "
+                                    "frequency band continues clean.");
             band.solo->setTooltip ("Auditions this band by itself.");
             band.mute->setTooltip ("Removes this frequency band from the output.");
 

@@ -27,6 +27,8 @@
 #include "../PluginEditor.h"
 #include "../PluginProcessor.h"
 
+#include <sys/resource.h>
+
 using namespace juce;
 using namespace fourcolor;
 
@@ -5145,6 +5147,365 @@ static void testMeterCalibration()
     }
 }
 
+
+// ================================================================================
+//  Phase 5 (RC): the editor under a real message loop, not forced snapshots
+//
+//  testAnalyzerCpu measures the COST of one repaint by forcing it. That is the
+//  right way to get a per-frame number, but it never lets JUCE decide what to
+//  redraw, so it cannot answer: does the timer really run at the rate it
+//  claims, are the frames evenly spaced, and does a playback frame repaint the
+//  analyzer alone or drag the whole window with it.
+//
+//  Two traps this test has to avoid, both of which the first version fell into:
+//
+//   - runDispatchLoopUntil spins, so process CPU measured around it is mostly
+//     the harness. Every load figure below is therefore a DIFFERENCE against
+//     the identical loop with no editor open.
+//
+//   - a child component that is not opaque makes its parent paint the
+//     background behind it, so the editor's paint() being called once per
+//     analyzer frame is normal and means nothing. What matters is the clipped
+//     AREA of those paints.
+// ================================================================================
+static void testEditorUnderRealMessageLoop()
+{
+    section ("Phase 5: editor performance under a real message loop");
+
+    //  Process CPU, so a spinning loop is counted and a sleeping one is not.
+    auto cpuSecondsNow = []
+    {
+        rusage usage {};
+        getrusage (RUSAGE_SELF, &usage);
+        return (double) usage.ru_utime.tv_sec + 1.0e-6 * (double) usage.ru_utime.tv_usec
+             + (double) usage.ru_stime.tv_sec + 1.0e-6 * (double) usage.ru_stime.tv_usec;
+    };
+
+    FourColorProcessor proc;
+    proc.setPlayConfigDetails (2, 2, 48000.0, 512);
+    proc.prepareToPlay (48000.0, 512);
+
+    MidiBuffer midi;
+    AudioBuffer<float> audio (2, 512);
+    int sampleIndex = 0;
+
+    auto pushAudio = [&]
+    {
+        for (int i = 0; i < 512; ++i, ++sampleIndex)
+        {
+            const auto v = 0.3f * (float) std::sin (MathConstants<double>::twoPi
+                                                        * 220.0 * sampleIndex / 48000.0);
+            audio.setSample (0, i, v);
+            audio.setSample (1, i, v);
+        }
+        proc.processBlock (audio, midi);
+    };
+
+    //  One measured stretch of the same loop, with or without an editor open.
+    struct Run { double load, seconds; };
+    auto runLoop = [&] (double seconds, bool withAudio)
+    {
+        const double cpu0 = cpuSecondsNow();
+        const auto wall0 = Time::getMillisecondCounterHiRes();
+
+        while (Time::getMillisecondCounterHiRes() - wall0 < seconds * 1000.0)
+        {
+            if (withAudio)
+                pushAudio();                                  // ~10.7 ms of audio
+            MessageManager::getInstance()->runDispatchLoopUntil (5);
+        }
+
+        const double elapsed = (Time::getMillisecondCounterHiRes() - wall0) / 1000.0;
+        return Run { 100.0 * (cpuSecondsNow() - cpu0) / jmax (1.0e-9, elapsed), elapsed };
+    };
+
+    constexpr double runSeconds = 10.0;
+    constexpr double idleSeconds = 3.0;
+
+    //  --- baselines: the same loop, no editor -------------------------------
+    for (int i = 0; i < 20; ++i) pushAudio();
+    MessageManager::getInstance()->runDispatchLoopUntil (200);
+
+    const double baseActive = runLoop (2.0, true).load;
+    const double baseIdle   = runLoop (2.0, false).load;
+
+    std::printf ("      harness baseline (no editor): %.1f%% with audio, %.1f%% idle\n",
+                 baseActive, baseIdle);
+
+    //  --- now with the editor open ------------------------------------------
+    std::unique_ptr<AudioProcessorEditor> editor (proc.createEditor());
+    editor->setSize (980, 620);
+    editor->addToDesktop (0);
+    editor->setVisible (true);
+
+    auto* fc = dynamic_cast<FourColorEditor*> (editor.get());
+    check (fc != nullptr, "editor is a FourColorEditor");
+    if (fc == nullptr)
+        return;
+
+    auto& counters = fc->getAnalyzer().counters;
+    const long long editorArea = (long long) editor->getWidth() * editor->getHeight();
+
+    //  Warm up: backdrop image, spectrum fill, meter ballistics.
+    for (int i = 0; i < 20; ++i) pushAudio();
+    MessageManager::getInstance()->runDispatchLoopUntil (400);
+
+    counters.timerTicks.store (0);
+    counters.paints.store (0);
+    counters.tickTimeCount.store (0);
+    fc->backgroundPaints.store (0);
+    fc->backgroundPaintArea.store (0);
+
+    const auto active = runLoop (runSeconds, true);
+
+    const int ticks = counters.timerTicks.load();
+    const int analyzerPaints = counters.paints.load();
+    const int editorPaints = fc->backgroundPaints.load();
+    const long long paintedArea = fc->backgroundPaintArea.load();
+    const double measuredFps = ticks / jmax (1.0e-9, active.seconds);
+
+    //  Frame intervals, from the timestamps taken inside the callback.
+    std::vector<double> intervals;
+    const int stamped = jmin (counters.tickTimeCount.load(),
+                              ui::Analyzer::Counters::maxTickTimes);
+    for (int i = 1; i < stamped; ++i)
+        intervals.push_back (counters.tickTimeMs[i] - counters.tickTimeMs[i - 1]);
+
+    std::sort (intervals.begin(), intervals.end());
+    const double p95 = intervals.empty()
+                         ? 0.0
+                         : intervals[jmin (intervals.size() - 1,
+                                           (size_t) (0.95 * (double) intervals.size()))];
+
+    const double activeLoad = active.load - baseActive;
+    const double areaPerFrame = analyzerPaints > 0
+                                  ? (double) paintedArea / (double) analyzerPaints : 0.0;
+
+    std::printf ("      %.1f s of playback: %d timer ticks (%.1f FPS, nominal %d),"
+                 " p95 frame interval %.1f ms\n",
+                 active.seconds, ticks, measuredFps, ui::Analyzer::analyzerFps, p95);
+    std::printf ("      editor cost above baseline: %.1f%% of one core\n", activeLoad);
+    std::printf ("      background repaints: %d calls, %.0f%% of the window per frame\n",
+                 editorPaints, 100.0 * areaPerFrame / (double) editorArea);
+
+    check (measuredFps > ui::Analyzer::analyzerFps * 0.8
+               && measuredFps < ui::Analyzer::analyzerFps * 1.2,
+           "the analyzer timer runs at its nominal rate ("
+               + String (measuredFps, 1) + " FPS)");
+
+    checkPerformance (p95 < 40.0,
+                      "p95 frame interval is under 40 ms (" + String (p95, 1) + " ms)");
+
+    checkPerformance (activeLoad < 15.0,
+                      "the open editor costs under 15% of one core during playback ("
+                          + String (activeLoad, 1) + "%)");
+
+    //  The background behind the analyzer has to be repainted - the analyzer is
+    //  not opaque - but nothing should be dirtying the rest of the window.
+    check (areaPerFrame < 0.5 * (double) editorArea,
+           "a playback frame does not dirty the whole window ("
+               + String (100.0 * areaPerFrame / (double) editorArea, 0) + "% per frame)");
+
+    //  --- idle: transport stopped, nothing moving ---------------------------
+    MessageManager::getInstance()->runDispatchLoopUntil (3000);  // let everything fall
+
+    counters.paints.store (0);
+    counters.timerTicks.store (0);
+    fc->backgroundPaints.store (0);
+
+    //  Three passes, and the baseline re-measured between them. A single
+    //  three-second window on a spinning dispatch loop is noisy enough that one
+    //  reading cannot tell 2% from 4%.
+    double idleLoad = 1.0e9;
+    for (int pass = 0; pass < 3; ++pass)
+    {
+        const double b = runLoop (1.5, false).load;
+        const double m = runLoop (idleSeconds, false).load;
+        std::printf ("      idle pass %d: baseline %.1f%%, with editor %.1f%%\n",
+                     pass + 1, b, m);
+        idleLoad = jmin (idleLoad, m - b);
+    }
+
+    std::printf ("      idle editor, transport stopped: %.1f%% of one core above baseline"
+                 " (%d analyzer ticks, %d analyzer paints, %d background paints)\n",
+                 idleLoad, counters.timerTicks.load(), counters.paints.load(),
+                 fc->backgroundPaints.load());
+    checkPerformance (idleLoad < 2.0,
+                      "an idle editor stays under 2% of one core ("
+                          + String (idleLoad, 1) + "%)");
+
+    editor->removeFromDesktop();
+}
+
+
+// ================================================================================
+//  Phase 5 (RC): Power, Solo and Mute are three different things
+//
+//  Power is the band's existing `bN_bypass` parameter under another name. The
+//  host sees "LOW Bypass" and always will - the ID is frozen and every preset
+//  depends on it - while the UI shows a power light with the sense inverted:
+//  Power ON is bypass FALSE. That inversion is the kind of thing that silently
+//  rots, so it is asserted here rather than trusted.
+// ================================================================================
+static void testPowerSoloMuteSemantics()
+{
+    section ("Phase 5: Power, Solo and Mute are distinct");
+
+    const double sr = 48000.0;
+    const int block = 512;
+
+    //  RMS at a frequency that sits squarely inside the LOW band.
+    auto rmsWith = [&] (std::function<void (EngineParameters&)> configure, double freq)
+    {
+        FourColorEngine engine;
+        engine.prepare (sr, block, 1);
+
+        EngineParameters p;
+        p.autoLevel = false;
+        for (auto& b : p.bands)
+        {
+            b.color = ColorType::warm;
+            b.drive = 70.0f;      // clearly audible colour, so "clean" is distinguishable
+            b.space = 0.0f;
+        }
+        configure (p);
+        engine.setParameters (p);
+
+        AudioBuffer<float> io (1, block);
+        double sq = 0.0;
+        int counted = 0, s = 0;
+
+        for (int blk = 0; blk < 80; ++blk)
+        {
+            for (int i = 0; i < block; ++i, ++s)
+                io.setSample (0, i, 0.3f * (float) std::sin (
+                    MathConstants<double>::twoPi * freq * s / sr));
+
+            engine.setParameters (p);
+            engine.process (io);
+
+            if (blk >= 40)
+            {
+                for (int i = 0; i < block; ++i)
+                    sq += (double) io.getSample (0, i) * io.getSample (0, i);
+                counted += block;
+            }
+        }
+
+        return std::sqrt (sq / jmax (1, counted));
+    };
+
+    constexpr double lowFreq = 60.0;
+
+    const double normal   = rmsWith ([] (EngineParameters&) {}, lowFreq);
+    const double powerOff = rmsWith ([] (EngineParameters& p) { p.bands[0].bypass = true; }, lowFreq);
+    const double muted    = rmsWith ([] (EngineParameters& p) { p.bands[0].mute = true; }, lowFreq);
+
+    std::printf ("      LOW at 60 Hz: normal %.4f, Power off %.4f, Mute %.4f\n",
+                 normal, powerOff, muted);
+
+    //  Power off still passes audio - that is the whole difference from Mute.
+    //  Mute is not judged against silence here: a 4th-order crossover at 120 Hz
+    //  still passes 60 Hz into the band above it about 24 dB down, so muting
+    //  ONE band cannot take a 60 Hz tone to zero and asking it to would be
+    //  measuring the crossover, not the button. What matters is the distance
+    //  between the two states.
+    const double powerVsMuteDb = Decibels::gainToDecibels (powerOff / jmax (1.0e-12, muted));
+
+    check (powerOff > normal * 0.5,
+           "Power off keeps the band audible ("
+               + String (Decibels::gainToDecibels (powerOff / normal), 2) + " dB)");
+    check (powerVsMuteDb > 12.0,
+           "Power off and Mute are far apart (" + String (powerVsMuteDb, 1) + " dB)");
+
+    //  ...and what a powered-off band passes is CLEAN. Compared across ALL
+    //  four bands, because with only band 0 off the other three still colour
+    //  the crossover's leakage and the two renders are not comparable.
+    const double allOff = rmsWith ([] (EngineParameters& p)
+                                   { for (auto& b : p.bands) b.bypass = true; }, lowFreq);
+    const double allDrive0 = rmsWith ([] (EngineParameters& p)
+                                      { for (auto& b : p.bands) b.drive = 0.0f; }, lowFreq);
+    const double allMuted = rmsWith ([] (EngineParameters& p)
+                                     { for (auto& b : p.bands) b.mute = true; }, lowFreq);
+
+    std::printf ("      all four: powered off %.4f, Drive 0 %.4f, muted %.6f\n",
+                 allOff, allDrive0, allMuted);
+
+    check (std::abs (Decibels::gainToDecibels (allOff / allDrive0)) < 0.1,
+           "powered-off bands pass exactly what Drive 0 passes ("
+               + String (Decibels::gainToDecibels (allOff / allDrive0), 3) + " dB)");
+    check (allMuted < allDrive0 * 0.001,
+           "muting every band gives silence ("
+               + String (Decibels::gainToDecibels (allMuted / allDrive0), 1) + " dB)");
+
+    //  --- Solo over a powered-off band --------------------------------------
+    //  Solo restricts the output to band 0 alone, so the reference has to be
+    //  band 0 alone at Drive 0 - not the whole four-band sum.
+    const double soloPoweredOff = rmsWith ([] (EngineParameters& p)
+                                           {
+                                               p.bands[0].bypass = true;
+                                               p.bands[0].solo = true;
+                                           }, lowFreq);
+    const double soloClean = rmsWith ([] (EngineParameters& p)
+                                      {
+                                          for (auto& b : p.bands) b.drive = 0.0f;
+                                          p.bands[0].solo = true;
+                                      }, lowFreq);
+    const double soloHighWhileLowOff = rmsWith ([] (EngineParameters& p)
+                                                {
+                                                    p.bands[0].bypass = true;
+                                                    p.bands[3].solo = true;
+                                                }, lowFreq);
+
+    std::printf ("      solo of a powered-off LOW: %.4f (clean band 0 alone %.4f);"
+                 " soloing HIGH instead leaves %.6f at 60 Hz\n",
+                 soloPoweredOff, soloClean, soloHighWhileLowOff);
+
+    check (std::abs (Decibels::gainToDecibels (soloPoweredOff / soloClean)) < 0.1,
+           "soloing a powered-off band auditions it CLEAN, not silent ("
+               + String (Decibels::gainToDecibels (soloPoweredOff / soloClean), 3) + " dB)");
+    check (soloHighWhileLowOff < normal * 0.02,
+           "soloing another band still excludes the powered-off one");
+
+    //  Mute beats Solo, on the same band.
+    const double soloAndMute = rmsWith ([] (EngineParameters& p)
+                                        {
+                                            p.bands[0].solo = true;
+                                            p.bands[0].mute = true;
+                                        }, lowFreq);
+    check (soloAndMute < normal * 0.02, "Mute wins over Solo");
+
+    //  --- the host/UI inversion ---------------------------------------------
+    {
+        FourColorProcessor proc;
+        auto* bypassParam = proc.apvts.getParameter (param::band (0, param::bypass));
+        check (bypassParam != nullptr, "band 0 still exposes bN_bypass to the host");
+
+        if (bypassParam != nullptr)
+        {
+            //  The host-facing name says Bypass. The UI's inversion is what
+            //  turns that into a Power light, and it is applied in BandHeaders
+            //  via IconToggle::setInverted.
+            check (bypassParam->getName (64).containsIgnoreCase ("bypass"),
+                   "the host still calls it Bypass (" + bypassParam->getName (64) + ")");
+
+            std::unique_ptr<AudioProcessorEditor> editor (proc.createEditor());
+            editor->setSize (980, 620);
+
+            //  Power ON is bypass FALSE. Drive the parameter from the host side
+            //  and confirm the engine agrees, which is the half of the
+            //  inversion that can actually break silently.
+            bypassParam->setValueNotifyingHost (1.0f);
+            MessageManager::getInstance()->runDispatchLoopUntil (60);
+            check (bypassParam->getValue() > 0.5f, "host can set band Bypass true");
+
+            bypassParam->setValueNotifyingHost (0.0f);
+            MessageManager::getInstance()->runDispatchLoopUntil (60);
+            check (bypassParam->getValue() < 0.5f, "host can set band Bypass false");
+        }
+    }
+}
+
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -5176,6 +5537,7 @@ int main()
 
     testBehaviorAttackVsBody();
     testAllBandPowerMasks();
+    testPowerSoloMuteSemantics();
     testBodyIsUpwardDensity();
     testBodyDoesNotShiftTheStereoImage();
     testBodyDoesNotLiftNoiseFloor();
@@ -5213,6 +5575,7 @@ int main()
     testEditorSizesAndState();
     testSpectrumTapIsAudioSafe();
     testAnalyzerCpu();
+    testEditorUnderRealMessageLoop();
 
     std::printf ("\n%d checks, %d failed\n", checksRun, checksFailed);
     return checksFailed == 0 ? 0 : 1;
