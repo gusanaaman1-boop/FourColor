@@ -1,0 +1,474 @@
+FOUR COLOR test suite
+
+=== Phase 1: parameter layout ===
+  ok  51 host-visible parameters (measured 51)
+  ok  global parameter exists: input
+  ok  global parameter exists: globalDrive
+  ok  global parameter exists: globalTone
+  ok  global parameter exists: autoLevel
+  ok  global parameter exists: mix
+  ok  global parameter exists: output
+  ok  global parameter exists: quality
+  ok  global parameter exists: bypassed
+  ok  global parameter exists: xover1
+  ok  global parameter exists: xover2
+  ok  global parameter exists: xover3
+  ok  band parameter exists: b0_color
+  ok  band parameter exists: b0_drive
+  ok  band parameter exists: b0_behavior
+  ok  band parameter exists: b0_tone
+  ok  band parameter exists: b0_space
+  ok  band parameter exists: b0_bandMix
+  ok  band parameter exists: b0_level
+  ok  band parameter exists: b0_solo
+  ok  band parameter exists: b0_mute
+  ok  band parameter exists: b0_bypass
+  ok  band parameter exists: b1_color
+  ok  band parameter exists: b1_drive
+  ok  band parameter exists: b1_behavior
+  ok  band parameter exists: b1_tone
+  ok  band parameter exists: b1_space
+  ok  band parameter exists: b1_bandMix
+  ok  band parameter exists: b1_level
+  ok  band parameter exists: b1_solo
+  ok  band parameter exists: b1_mute
+  ok  band parameter exists: b1_bypass
+  ok  band parameter exists: b2_color
+  ok  band parameter exists: b2_drive
+  ok  band parameter exists: b2_behavior
+  ok  band parameter exists: b2_tone
+  ok  band parameter exists: b2_space
+  ok  band parameter exists: b2_bandMix
+  ok  band parameter exists: b2_level
+  ok  band parameter exists: b2_solo
+  ok  band parameter exists: b2_mute
+  ok  band parameter exists: b2_bypass
+  ok  band parameter exists: b3_color
+  ok  band parameter exists: b3_drive
+  ok  band parameter exists: b3_behavior
+  ok  band parameter exists: b3_tone
+  ok  band parameter exists: b3_space
+  ok  band parameter exists: b3_bandMix
+  ok  band parameter exists: b3_level
+  ok  band parameter exists: b3_solo
+  ok  band parameter exists: b3_mute
+  ok  band parameter exists: b3_bypass
+  ok  bypass parameter is reported to the host
+
+=== Phase 1: state save/recall ===
+  ok  input restored  (measured -6.500000, expected -6.500000 +/- 0.010000)
+  ok  mix restored  (measured 62.000000, expected 62.000000 +/- 0.100000)
+  ok  quality restored  (measured 3.000000, expected 3.000000 +/- 0.010000)
+  ok  xover1 restored  (measured 88.000000, expected 88.000000 +/- 0.500000)
+  ok  xover3 restored  (measured 8000.000000, expected 8000.000000 +/- 20.000000)
+  ok  band 1 drive restored  (measured 77.000000, expected 77.000000 +/- 0.100000)
+  ok  band 2 color restored  (measured 2.000000, expected 2.000000 +/- 0.010000)
+  ok  band 3 behavior restored  (measured -39.999996, expected -40.000000 +/- 0.100000)
+  ok  band 0 solo restored  (measured 1.000000, expected 1.000000 +/- 0.010000)
+  ok  selectedBand UI property restored
+
+=== Phase 13: state versioning, migration and hostile input ===
+  ok  all 31 presets round-trip with no parameter mismatch (worst 0)
+  ok  saved state carries stateVersion 1
+  ok  an untagged state is recognised as v0 and is loadable
+  ok  migration stamps the current version
+  ok  migration fills in editor properties a v0 state never had
+  ok  a state from a newer version still loads
+  ok  an unknown property survives migration
+  ok  an unknown PARAM survives migration instead of being deleted
+  ok  a future version number is not downgraded
+  ok  garbage input leaves every parameter untouched
+  ok  null or empty state leaves every parameter untouched
+  ok  a state carrying NaN and infinity produces no non-finite parameter
+  ok  the plug-in still processes cleanly after a poisoned state
+  ok  golden state fixtures present (7)
+      fixtures: 7 loaded, 0 failed
+  ok  every golden fixture still loads (7/7)
+  ok  saved state holds only parameters and editor properties (extras: none, non-PARAM children: 0)
+
+=== Phase 1: passthrough, bypass, safety ===
+  ok  global bypass = input delayed by reported latency (65 smp, max error 0.00000003)
+  ok  silence stays silent (peak 0.000000000)
+  ok  silence output is finite
+  ok  NaN/Inf input scrubbed to finite output
+  ok  hot input bounded by safety ceiling
+  ok  hot input output is finite
+
+=== Phase 1: audio thread never allocates ===
+  ok  processBlock performs no allocations (counted 0)
+
+=== Phase 2: crossover recombination (magnitude) ===
+  ok  recombined level flat at 30 Hz  (measured 0.000012, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 60 Hz  (measured 0.000047, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 120 Hz  (measured 0.000087, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 240 Hz  (measured 0.000046, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 350 Hz  (measured 0.000021, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 700 Hz  (measured 0.000005, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 1400 Hz  (measured 0.000000, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 2250 Hz  (measured -0.000002, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 4500 Hz  (measured -0.000004, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 9000 Hz  (measured -0.000001, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 15000 Hz  (measured -0.000000, expected 0.000000 +/- 0.100000)
+  ok  recombined level flat at 18000 Hz  (measured -0.000000, expected 0.000000 +/- 0.100000)
+      worst recombination deviation: 0.00009 dB
+
+=== Phase 2: crossover null against allpass reference ===
+  ok  band sum nulls against allpass reference, worst sample (-111.9 dB)
+  ok  band sum nulls against allpass reference, RMS (-109.0 dB)
+
+=== Phase 2: crossover spacing + click-free automation ===
+  ok  f1 pushed below f2/ratio (got 230.8 Hz)
+  ok  f3 pushed above f2*ratio (got 1500.0 Hz)
+  ok  no clicks while sweeping f2 (max step 0.0306)
+
+=== ColorContext: colour engines know where they are ===
+  ok  every band's context carries its own crossover edges
+  ok  every band's context carries its own index
+  ok  the context reports the oversampled rate, not the base rate
+  ok  IRON stays finite across a band-edge move
+  ok  a band-edge move produces no sample step above 0.02 FS (max 0.0072)
+  ok  the reference run actually produced signal
+  ok  f1 sweep 40-400 Hz stays finite
+  ok  f1 sweep 40-400 Hz produces no sample step above 0.02 FS (max 0.0075)
+  ok  moving a crossover allocates nothing on the audio thread (0)
+
+=== Phase 3: engines are genuinely different ===
+      WARM  h1..h8 (dB rel h1):    0.0  -31.0  -20.3  -38.7  -32.1  -44.5  -40.6  -48.9   dc -0.000010  rms 0.1651
+  ok  WARM has no DC offset (-0.0000104)
+  ok  WARM actually distorts at drive 50
+      IRON  h1..h8 (dB rel h1):    0.0  -34.1  -23.5  -41.4  -45.5  -54.2  -68.1  -61.7   dc -0.000029  rms 0.1620
+  ok  IRON has no DC offset (-0.0000288)
+  ok  IRON actually distorts at drive 50
+      BITE  h1..h8 (dB rel h1):    0.0  -29.0  -13.1  -35.5  -21.3  -43.1  -27.8  -48.6   dc -0.000080  rms 0.1752
+  ok  BITE has no DC offset (-0.0000797)
+  ok  BITE actually distorts at drive 50
+      FUZZ  h1..h8 (dB rel h1):    0.0   -8.8   -5.4  -34.0  -33.8  -18.2  -28.7  -25.2   dc -0.000011  rms 0.1763
+  ok  FUZZ has no DC offset (-0.0000106)
+  ok  FUZZ actually distorts at drive 50
+  ok  WARM vs IRON spectra differ (distance 13.20 dB)
+  ok  WARM vs BITE spectra differ (distance 7.06 dB)
+  ok  WARM vs FUZZ spectra differ (distance 17.46 dB)
+  ok  IRON vs BITE spectra differ (distance 19.54 dB)
+  ok  IRON vs FUZZ spectra differ (distance 27.62 dB)
+  ok  BITE vs FUZZ spectra differ (distance 16.00 dB)
+  ok  BITE has far more upper harmonics than WARM (8.8 dB more)
+  ok  WARM harmonic content grows with drive
+  ok  IRON harmonic content grows with drive
+  ok  BITE harmonic content grows with drive
+  ok  FUZZ harmonic content grows with drive
+
+=== Phase 3: loudness stays in a window across engines and drives ===
+  ok  WARM drive 5 level deviation -0.03 dB (limit 4)
+  ok  WARM drive 25 level deviation -0.18 dB (limit 4)
+  ok  WARM drive 50 level deviation -0.60 dB (limit 4)
+  ok  WARM drive 75 level deviation -1.18 dB (limit 4)
+  ok  WARM drive 100 level deviation -1.17 dB (limit 4)
+  ok  IRON drive 5 level deviation -0.16 dB (limit 4)
+  ok  IRON drive 25 level deviation -0.66 dB (limit 4)
+  ok  IRON drive 50 level deviation -0.77 dB (limit 4)
+  ok  IRON drive 75 level deviation -0.32 dB (limit 4)
+  ok  IRON drive 100 level deviation -0.09 dB (limit 4)
+  ok  BITE drive 5 level deviation 0.46 dB (limit 4)
+  ok  BITE drive 25 level deviation 0.36 dB (limit 4)
+  ok  BITE drive 50 level deviation -0.08 dB (limit 4)
+  ok  BITE drive 75 level deviation -0.43 dB (limit 4)
+  ok  BITE drive 100 level deviation -0.61 dB (limit 4)
+  ok  FUZZ drive 5 level deviation -0.01 dB (limit 4)
+  ok  FUZZ drive 25 level deviation -0.02 dB (limit 4)
+  ok  FUZZ drive 50 level deviation -0.03 dB (limit 4)
+  ok  FUZZ drive 75 level deviation 0.00 dB (limit 4)
+  ok  FUZZ drive 100 level deviation 0.03 dB (limit 4)
+
+=== Phase 3: aliasing vs quality (FUZZ, worst case) ===
+      1x: worst audible alias 19.7 dB (at 3176 Hz); full band 15.5 dB (at 23098 Hz)
+      2x: worst audible alias 25.1 dB (at 8842 Hz); full band 25.1 dB (at 8842 Hz)
+      4x: worst audible alias 42.1 dB (at 17684 Hz); full band 29.9 dB (at 23098 Hz)
+      8x: worst audible alias 60.4 dB (at 16928 Hz); full band 29.9 dB (at 23098 Hz)
+  ok  2x clearly reduces worst-case alias vs 1x (5.4 dB)
+  ok  4x clearly reduces worst-case alias vs 2x (17.0 dB)
+  ok  8x clearly reduces worst-case alias vs 4x (18.3 dB)
+  ok  4x (default) worst-case audible alias below -40 dB (-42.1 dB)
+  ok  8x (Ultra) worst-case audible alias below -55 dB (-60.4 dB)
+
+=== Phase 3: aliasing at default quality, typical material (BITE) ===
+  ok  typical-material audible alias below -60 dB at default quality (-66.7 dB)
+
+=== Phase 3: colour switch is click-free; latency reported per quality ===
+      quality 1x: oversampler 0.000 + pad 65.000 = 65.000 samples
+      quality 2x: oversampler 49.000 + pad 16.000 = 65.000 samples
+      quality 4x: oversampler 59.500 + pad 5.500 = 65.000 samples
+      quality 8x: oversampler 64.250 + pad 0.750 = 65.000 samples
+  ok  quality 1x reports the same latency (65.000)
+  ok  quality 2x reports the same latency (65.000)
+  ok  quality 4x reports the same latency (65.000)
+  ok  quality 8x reports the same latency (65.000)
+  ok  colour switching output stays finite
+  ok  colour switch adds no clicks beyond the engines' own waveform edges (fade max step 0.0729, steady max step 0.0692)
+
+=== Phase 4: all bands bypassed = flat clean reconstruction ===
+  ok  clean reconstruction flat at 40 Hz  (measured 0.002985, expected 0.000000 +/- 0.050000)
+  ok  clean reconstruction flat at 120 Hz  (measured -0.010607, expected 0.000000 +/- 0.050000)
+  ok  clean reconstruction flat at 700 Hz  (measured 0.001566, expected 0.000000 +/- 0.050000)
+  ok  clean reconstruction flat at 4500 Hz  (measured -0.000004, expected 0.000000 +/- 0.050000)
+  ok  clean reconstruction flat at 12000 Hz  (measured -0.000000, expected 0.000000 +/- 0.050000)
+
+=== Phase 4: solo / mute / band level ===
+  ok  solo LOW keeps low content (-0.53 dB)
+  ok  solo LOW rejects 8 kHz by >34 dB (-100.0 dB)
+  ok  all bands muted = silence (rms 0.00000000)
+  ok  band 0 level -12 dB moves 60 Hz by ~-12 dB (LR4 leakage included)  (measured -10.595563, expected -12.000000 +/- 2.000000)
+
+=== Phase 4: sample-rate / block-size / channel matrix ===
+  ok  44.1 kHz / block 2048 / 2ch: finite=1 peak=0.538 allocs=0
+  ok  48.0 kHz / block 2048 / 2ch: finite=1 peak=0.536 allocs=0
+  ok  88.2 kHz / block 2048 / 2ch: finite=1 peak=0.545 allocs=0
+  ok  96.0 kHz / block 2048 / 2ch: finite=1 peak=0.544 allocs=0
+  ok  192.0 kHz / block 2048 / 2ch: finite=1 peak=0.545 allocs=0
+      matrix: 80 configurations checked
+
+=== Phase 4: quality switch during playback ===
+  ok  output stays finite through quality switches
+  ok  latency is 65 samples in every quality (65/65/65/65 smp)
+
+=== Phase 12: Quality switches are click-free and time-invariant ===
+      sine             pre-switch diff 0.000000000, envelope excess +0.19 dB, step 0.01811 FS (same material away from the switch: 0.01403), silent run 0
+  ok  sine: a Quality change alters nothing before it happens (diff 0.000000000)
+  ok  sine: the switch adds no envelope discontinuity beyond the material's own (0.19 dB)
+  ok  sine: no dropout longer than one sample (0)
+  ok  sine: no switch steps more than 0.02 FS (0.01811)
+      pink-ish noise   pre-switch diff 0.000000000, envelope excess +0.00 dB, step 0.29050 FS (same material away from the switch: 0.26133), silent run 0
+  ok  pink-ish noise: a Quality change alters nothing before it happens (diff 0.000000000)
+  ok  pink-ish noise: the switch adds no envelope discontinuity beyond the material's own (0.00 dB)
+  ok  pink-ish noise: no dropout longer than one sample (0)
+      transient train  pre-switch diff 0.000000000, envelope excess +0.00 dB, step 0.00366 FS (same material away from the switch: 0.00908), silent run 0
+  ok  transient train: a Quality change alters nothing before it happens (diff 0.000000000)
+  ok  transient train: the switch adds no envelope discontinuity beyond the material's own (0.00 dB)
+  ok  transient train: no dropout longer than one sample (0)
+  ok  transient train: no switch steps more than 0.02 FS (0.00366)
+
+=== Phase 3: ATTACK drives the hit, BODY fills the decay ===
+      attack crunch: BODY 0.0214, neutral 0.0198, ATTACK 0.0228
+      body RMS:      BODY 0.1853, neutral 0.1585, ATTACK 0.1806
+  ok  ATTACK puts more crunch on the hit than the neutral centre (1.24 dB)
+  ok  BODY raises the decay above the neutral centre (1.35 dB)
+  ok  sustain level shift between extremes is bounded (0.22 dB)
+
+=== Phase 7: every combination of band Power reconstructs cleanly ===
+  ok  all 16 band-power masks stay finite
+  ok  no band-power mask puts a hole in the spectrum
+      all four powered off: worst deviation 0.093 dB across the spectrum
+  ok  all four bands powered off leaves the spectrum uncoloured (0.093 dB)
+      Power toggled mid-stream: worst step 0.36221 FS (same material elsewhere 0.36549)
+  ok  toggling band Power adds no step the material did not have (0.36221 vs 0.36549)
+
+=== Phase 3: BODY lifts the decay, not the hit and not the silence ===
+      bass note  decay +2.74 dB   attack +0.00 dB   tail -200.0 dBFS (neutral -200.0)
+      808        decay +1.70 dB   attack +0.00 dB   tail -200.0 dBFS (neutral -200.0)
+      pad        decay +1.15 dB   attack +0.00 dB   tail -200.0 dBFS (neutral -200.0)
+      vocal      decay +0.57 dB   attack +0.00 dB   tail -200.0 dBFS (neutral -200.0)
+FAIL  BODY adds at least 2 dB to the decay on every source (weakest 0.57 dB)
+  ok  BODY leaves the initial attack alone (worst rise 0.00 dB)
+  ok  BODY leaves the silent tail below -80 dBFS (worst -100.0 dBFS)
+
+=== Phase 3: BODY does not lift a noise floor ===
+      noise floor at -66 dBFS rises +0.000 dB under full BODY
+  ok  a noise floor is not lifted by BODY (0.000 dB)
+
+=== Phase 5: no pumping on sustained material ===
+  ok  BODY extreme shifts sustained level < 1 dB (0.71 dB)
+  ok  ATTACK extreme shifts sustained level < 1 dB (0.41 dB)
+
+=== Phase 5: behavior detector is stereo-linked ===
+      R-channel modulation near L-only burst: 4.30 dB
+  ok  linked detector modulates R for an L-only transient (4.30 dB)
+
+=== Phase 15: engaging Behavior does not start the detector from cold ===
+      band 1: engaged-late vs always-on modulation differs by -200.0 dBFS
+      band 2: engaged-late vs always-on modulation differs by -200.0 dBFS
+      band 3: engaged-late vs always-on modulation differs by -101.3 dBFS
+      band 4: engaged-late vs always-on modulation differs by -101.3 dBFS
+  ok  a detector engaged late matches one that ran continuously (worst -101.3 dBFS)
+
+=== Phase 15: sustained tones do not make the modulation ripple ===
+      LOW at 40 Hz       modulation ripple 0.251 dB peak-to-peak
+      LOW at 90 Hz       modulation ripple 0.064 dB peak-to-peak
+      LOW MID at 300 Hz  modulation ripple 0.009 dB peak-to-peak
+      HIGH at 8 kHz      modulation ripple 0.000 dB peak-to-peak
+  ok  sustained tones leave the modulation flat (worst ripple 0.251 dB)
+
+=== Phase 3: each side of SHAPE is monotonic on its own measure ===
+      WARM BODY..ATTACK: 17.014 16.281 15.534 16.939 18.533  (attack +1.53 dB, body +0.79 dB vs centre)
+  ok  WARM: ATTACK rises monotonically from centre
+  ok  WARM: ATTACK is audible against the centre (1.53 dB)
+      IRON BODY..ATTACK: 15.319 15.040 14.597 15.266 16.157  (attack +0.88 dB, body +0.42 dB vs centre)
+  ok  IRON: ATTACK rises monotonically from centre
+  ok  IRON: ATTACK is audible against the centre (0.88 dB)
+      BITE BODY..ATTACK: 14.882 14.986 15.067 15.848 17.005  (attack +1.05 dB, body -0.11 dB vs centre)
+  ok  BITE: ATTACK rises monotonically from centre
+  ok  BITE: ATTACK is audible against the centre (1.05 dB)
+      FUZZ BODY..ATTACK: 70.234 60.490 47.117 53.454 61.253  (attack +2.28 dB, body +3.47 dB vs centre)
+  ok  FUZZ: ATTACK rises monotonically from centre
+  ok  FUZZ: ATTACK is audible against the centre (2.28 dB)
+
+=== Phase 6: Space works on the nonlinear residual only ===
+      relative halo: quiet (near-linear) 0.03788, hot (saturated) 0.37376
+  ok  space adds an audible halo when the engine distorts (rel rms 0.3738)
+  ok  the halo follows the DISTORTION, not the source (hot/quiet relative ratio 9.9x)
+
+=== Phase 6: LOW space stays mono; upper space keeps mono compatibility ===
+  ok  LOW-band halo is strictly mono (max L/R diff 0.000000000)
+  ok  HMID at full space keeps L/R correlation > 0.5 (0.899)
+  ok  upper-band space is not just dual mono (0.8989)
+
+=== Phase 6: Space decays fast and is skipped at 0% ===
+  ok  halo fully decayed 300 ms after the source stopped (peak 0.0000028)
+  ok  space off leaves no residue vs never-on (0.000000000)
+
+=== Phase 14: Space switch-on leaks no clean source into the halo ===
+      WARM: source leaked into the halo at switch-on -67.8 dB
+  ok  WARM: Drive 0 + Space 100 diffuses no clean source (-67.8 dB)
+      IRON: source leaked into the halo at switch-on -68.3 dB
+  ok  IRON: Drive 0 + Space 100 diffuses no clean source (-68.3 dB)
+      BITE: source leaked into the halo at switch-on -66.8 dB
+  ok  BITE: Drive 0 + Space 100 diffuses no clean source (-66.8 dB)
+      FUZZ: source leaked into the halo at switch-on -71.4 dB
+  ok  FUZZ: Drive 0 + Space 100 diffuses no clean source (-71.4 dB)
+
+=== Phase 14: Space survives FUZZ opening and closing its gate ===
+      gated FUZZ: worst step at switch-on 0.17460 FS, same material just before it 0.17092 FS
+  ok  gated FUZZ with Space stays finite throughout
+  ok  turning Space up under a gating FUZZ adds no step the material did not have (0.17460 vs 0.17092)
+
+=== Phase 14: one transient, then silence ===
+      tail 300 ms after the source stopped: -91.7 dBFS
+  ok  the halo is gone 300 ms after the source stops (-91.7 dBFS)
+  ok  a single transient into silence leaves nothing non-finite
+
+=== Phase 14: the fit coefficients stay bounded and finite ===
+      worst |g0| 1.485, worst |g1| 0.026
+  ok  no fit coefficient ever becomes non-finite
+  ok  fit coefficients stay inside their bounds (|g0| 1.49, |g1| 0.03)
+
+=== Phase 11: Drive 0 is a clean pass-through in every engine and band ===
+      worst of 16 engine/band pairs: THD+N -124.3 dB, |gain| 0.0016 dB
+  ok  Drive 0 leaves no nonlinear residual in any engine or band (worst THD+N -124.3 dB)
+  ok  Drive 0 is unity gain in any engine or band (worst |gain| 0.0016 dB)
+
+=== Phase 11: sweeping Drive through the engage window does not step ===
+      WARM: worst sample step 0.00544 FS (signal's own slope 0.00432)
+  ok  WARM: Drive 0->10->0 sweep steps no more than 0.02 FS (0.00544)
+      IRON: worst sample step 0.00437 FS (signal's own slope 0.00432)
+  ok  IRON: Drive 0->10->0 sweep steps no more than 0.02 FS (0.00437)
+      BITE: worst sample step 0.00765 FS (signal's own slope 0.00432)
+  ok  BITE: Drive 0->10->0 sweep steps no more than 0.02 FS (0.00765)
+      FUZZ: worst sample step 0.00446 FS (signal's own slope 0.00432)
+  ok  FUZZ: Drive 0->10->0 sweep steps no more than 0.02 FS (0.00446)
+
+=== Phase 7: Global Drive scales the bands' relative drives ===
+      h3/h1: globalDrive 10 -> 0.044486, 50 -> 0.087137, 100 -> 0.142602
+  ok  relative distortion rises with Global Drive (1.96x then 1.64x)
+  ok  Global Drive 20 x band 50 == Global 50 x band 20, sample for sample (worst 0.000000000)
+  ok  globalDrive 100 distorts clearly more than 50 (1.6x)
+
+=== Phase 7: Global Tone tilts around 800 Hz ===
+      bright tilt 8.94 dB, dark tilt -9.04 dB (4 kHz vs 200 Hz)
+  ok  BRIGHT tilts 4 kHz up vs 200 Hz by >8 dB (8.9)
+  ok  DARK tilts 4 kHz down vs 200 Hz by >8 dB (-9.0)
+
+=== Phase 7: Auto Level ===
+      deviation from input level: AL off 1.62 dB, AL on 0.52 dB
+  ok  Auto Level reduces the loudness error
+  ok  Auto Level lands within 1.5 dB of the input level (0.52 dB)
+  ok  gain held through silence: resumed tone within 1 dB (0.00 dB)
+
+=== Phase 17: Auto Level holds loudness, not RMS ===
+      bass       loudness error: 0.00 LU off -> 0.24 LU on
+      melody     loudness error: 4.20 LU off -> 0.86 LU on
+      drums      loudness error: 0.70 LU off -> 0.15 LU on
+      pad        loudness error: 0.39 LU off -> 0.04 LU on
+      vocal      loudness error: 3.10 LU off -> 0.48 LU on
+      full mix   loudness error: 0.09 LU off -> 0.05 LU on
+  ok  median loudness error is under 0.35 LU (0.20)
+FAIL  worst loudness error is under 0.75 LU (0.86)
+
+=== Phase 17: Auto Level does not drift in silence ===
+      gain 1.9957 established, worst drift over 5 s of silence 0.0016 dB
+  ok  the correction holds still in silence (0.0016 dB)
+
+=== Phase 7: Mix does not comb-filter ===
+  ok  mix 50% flat at 60 Hz  (measured 0.010371, expected 0.000000 +/- 0.200000)
+  ok  mix 50% flat at 120 Hz  (measured 0.006799, expected 0.000000 +/- 0.200000)
+  ok  mix 50% flat at 240 Hz  (measured -0.000122, expected 0.000000 +/- 0.200000)
+  ok  mix 50% flat at 700 Hz  (measured 0.000005, expected 0.000000 +/- 0.200000)
+  ok  mix 50% flat at 1400 Hz  (measured 0.000000, expected 0.000000 +/- 0.200000)
+  ok  mix 50% flat at 4500 Hz  (measured -0.000004, expected 0.000000 +/- 0.200000)
+  ok  mix 50% flat at 9000 Hz  (measured -0.000001, expected 0.000000 +/- 0.200000)
+  ok  mix 50% flat at 15000 Hz  (measured -0.000000, expected 0.000000 +/- 0.200000)
+      worst mix-path deviation: 0.0104 dB
+  ok  50% mix at the crossover with hot drive stays in window (0.69 dB)
+
+=== Phase 9: factory presets ===
+  ok  at least 24 musical presets + Default (found 31)
+  ok  preset 'Default' produces sane audio (peak 0.446)
+  ok  preset 'Sub Weight' produces sane audio (peak 0.503)
+  ok  preset 'Rolling Bass Body' produces sane audio (peak 0.661)
+  ok  preset 'Acid Bite' produces sane audio (peak 0.705)
+  ok  preset 'Mid Bass Iron' produces sane audio (peak 0.631)
+  ok  preset 'Bass Harmonic Lift' produces sane audio (peak 0.616)
+  ok  preset 'Controlled Bass Fuzz' produces sane audio (peak 0.560)
+  ok  preset 'Kick Weight' produces sane audio (peak 0.482)
+  ok  preset 'Kick Attack' produces sane audio (peak 0.663)
+  ok  preset 'Drum Bus Warmth' produces sane audio (peak 0.613)
+  ok  preset 'Crunchy Loop' produces sane audio (peak 0.654)
+  ok  preset 'Snare Bite' produces sane audio (peak 0.648)
+  ok  preset 'Parallel Fuzz Drums' produces sane audio (peak 0.675)
+  ok  preset 'Warm Pad' produces sane audio (peak 0.551)
+  ok  preset 'Dirty Pad Halo' produces sane audio (peak 0.529)
+  ok  preset 'Melodic Lead Bite' produces sane audio (peak 0.577)
+  ok  preset 'Dark Stab Iron' produces sane audio (peak 0.565)
+  ok  preset 'Acid Destruction' produces sane audio (peak 0.698)
+  ok  preset 'Upper Harmonic Lift' produces sane audio (peak 0.574)
+  ok  preset 'Vocal Edge' produces sane audio (peak 0.459)
+  ok  preset 'Dark Vocal Grit' produces sane audio (peak 0.504)
+  ok  preset 'Harmonic Air' produces sane audio (peak 0.467)
+  ok  preset 'Telephone Fuzz' produces sane audio (peak 0.373)
+  ok  preset 'Gentle Four-Band Glue' produces sane audio (peak 0.536)
+  ok  preset 'Low-End Safe Saturation' produces sane audio (peak 0.456)
+  ok  preset 'Brightness Without EQ' produces sane audio (peak 0.480)
+  ok  preset 'Parallel Color' produces sane audio (peak 0.598)
+  ok  preset 'BASS - Body Lift' produces sane audio (peak 0.550)
+  ok  preset '808 - Body Sustain' produces sane audio (peak 0.560)
+  ok  preset 'KICK - Attack Color' produces sane audio (peak 0.649)
+  ok  preset 'MELODY - Attack Bite' produces sane audio (peak 0.511)
+  ok  no two presets are identical (duplicates: 0)
+
+=== Phase 9: CPU (Release, stereo, 512-sample blocks) ===
+      4x: 0.54 s CPU for 10.0 s audio = 18.6x realtime
+  ok  4x runs faster than 8x realtime (18.6x)
+      8x: 0.96 s CPU for 10.0 s audio = 10.4x realtime
+  ok  8x runs faster than 8x realtime (10.4x)
+
+=== UI: editor renders at every supported size, state survives ===
+  ok  editor renders at 900x560
+  ok    content is drawn at 900x560 (467 distinct samples)
+  ok  editor renders at 980x620
+  ok    content is drawn at 980x620 (533 distinct samples)
+  ok  editor renders at 1400x900
+  ok    content is drawn at 1400x900 (652 distinct samples)
+  ok  opening the editor left band 2 drive untouched  (measured 65.000000, expected 65.000000 +/- 0.100000)
+  ok  opening the editor left crossover 2 untouched  (measured 1200.000000, expected 1200.000000 +/- 1.000000)
+  ok  opening the editor left band 3 level untouched  (measured -4.000000, expected -4.000000 +/- 0.100000)
+
+=== UI: spectrum tap costs the audio thread no allocations ===
+  ok  processBlock with the spectrum tap allocates nothing (counted 0)
+  ok  spectrum tap delivers frames to the editor (2048)
+  ok  delivered frames carry real audio, not zeros
+
+=== UI: analyzer CPU ===
+      analyzer only : 3.71 ms/frame -> 11.1% of one core at 30 FPS
+      whole editor  : 6.98 ms/frame -> 20.9% of one core (worst case,
+                      every surface forced to redraw each frame)
+  ok  analyzer repaint stays under 15% of one core (11.1%)
+  ok  forced full-editor redraw stays under 40% of one core (20.9%)
+
+381 checks, 2 failed
