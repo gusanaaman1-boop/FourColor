@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-title FOUR COLOR 0.1.0 - Installer
+title FOUR COLOR 1.0.0-rc.1 - Installer
 
 REM ---------------------------------------------------------------------------
 REM  No text echoed by this script may contain > < & | or ^.
@@ -19,7 +19,7 @@ echo Script folder: %~dp0>> "%LOG%"
 
 echo.
 echo  ============================================
-echo    FOUR COLOR by Gussa Naaman  -  v0.1.0
+echo    FOUR COLOR by Gussa Naaman  -  v1.0.0-rc.1
 echo    Multiband Colour and Saturation
 echo  ============================================
 echo.

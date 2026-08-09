@@ -4,7 +4,7 @@
 # layout as the TRIX / DUAL SPACE macOS packages.
 set -euo pipefail
 
-VERSION="${1:-0.1.0}"
+VERSION="${1:-1.0.0-rc.1}"
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 ART="$PROJ/build/FourColor_artefacts/Release"
 STAGE="$(mktemp -d)"

@@ -1,0 +1,4 @@
+02de3a55d6c693f82a512cc2f8e1a6619321d71dbeb3cbf5e407f6dc34f4dba2  artefacts/FourColor-1.0.0-rc.1-macOS.zip
+17090789780f6a36f059ec37f04bc72acb63baf689cad83a637a265217470705  /Users/gussa/Make Music/FourColor/build/FourColor_artefacts/Release/VST3/FourColor.vst3/Contents/MacOS/FourColor
+0ba11e45fb5789ef71b85e96d34f160d298dfdf1b46e91c58665442c44e040a0  /Users/gussa/Make Music/FourColor/build/FourColor_artefacts/Release/AU/FourColor.component/Contents/MacOS/FourColor
+17090789780f6a36f059ec37f04bc72acb63baf689cad83a637a265217470705  /Users/gussa/Library/Audio/Plug-Ins/VST3/FourColor.vst3/Contents/MacOS/FourColor

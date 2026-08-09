@@ -13,5 +13,8 @@ namespace fourcolor::productInfo
     inline constexpr const char* company = "Naaman";
     inline constexpr const char* maker   = "GUSSA NAAMAN";
 
-    inline constexpr const char* version = "0.1.0";
+    //  1.0.0-rc.1: a release candidate, not the release. It stays -rc until the
+    //  owner returns LISTENING, CUBASE MACOS, CUBASE WINDOWS and INSTALLER on a
+    //  clean machine, and until signing and notarization exist.
+    inline constexpr const char* version = "1.0.0-rc.1";
 }

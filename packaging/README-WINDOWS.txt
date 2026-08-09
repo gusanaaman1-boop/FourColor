@@ -1,5 +1,5 @@
 FOUR COLOR — Windows install
-Multiband Colour & Saturation · by Gussa Naaman · v0.1.0 · x64
+Multiband Colour & Saturation · by Gussa Naaman · v1.0.0-rc.1 · x64
 
 ------------------------------------------------------------------------------
 INSTALL - this is the whole thing

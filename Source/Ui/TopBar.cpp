@@ -333,6 +333,14 @@ namespace fourcolor::ui
         g.drawText (productInfo::maker, markArea.withWidth (wordmarkWidth),
                     juce::Justification::centredLeft);
 
+        //  The version, right-aligned under the wordmark. A release candidate
+        //  has to say so on its face: the owner will have more than one build
+        //  of this on disk before it ships, and "which one am I hearing" must
+        //  not be a guess.
+        g.setColour (tokens::textDisabled);
+        g.drawText (productInfo::version, markArea.withWidth (wordmarkWidth),
+                    juce::Justification::centredRight);
+
         //  Four band dots after the wordmark.
         const float dotSize = 7.0f;
         const float dotsX = textArea.getX() + wordmarkWidth + 16.0f;

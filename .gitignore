@@ -7,3 +7,6 @@ dist/
 # The RC listening pack is 154 MB of rendered WAVs. Regenerate with:
 #   FourColorRender --audition outputs/four-color-v1-rc/listening
 outputs/four-color-v1-rc/listening/
+# Built RC artefacts. hashes.txt records what they were; rebuild with
+#   cmake --build build --target FourColor_All && bash packaging/build-mac-pkg.sh
+outputs/four-color-v1-rc/artefacts/

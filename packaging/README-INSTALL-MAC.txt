@@ -5,7 +5,7 @@ Multiband Colour & Saturation · by Gussa Naaman
 INSTALL
 ------------------------------------------------------------------------------
 
-  Double-click  FourColor-0.1.0-macOS.pkg  and follow it.
+  Double-click  FourColor-1.0.0-rc.1-macOS.pkg  and follow it.
 
   It installs, and you can untick any of the three:
 
@@ -29,7 +29,7 @@ This build is signed ad-hoc but NOT notarised, so Gatekeeper may complain the
 first time. That is expected for a development build and does not mean
 anything is wrong with it.
 
-  "FourColor-0.1.0-macOS.pkg cannot be opened because it is from an
+  "FourColor-1.0.0-rc.1-macOS.pkg cannot be opened because it is from an
    unidentified developer"
 
     Right-click the .pkg -> Open -> Open. You only do this once.
