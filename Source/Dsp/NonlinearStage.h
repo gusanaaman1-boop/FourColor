@@ -48,10 +48,13 @@ namespace fourcolor
         //  is currently running at - so it fills that field in itself.
         void setContext (const ColorContext& c) noexcept;
 
-        //  In-place. `behaviorMod`, if given, is a base-rate per-sample linear
-        //  gain factor (around 1.0) applied to the engine pre-gain.
+        //  In-place. Both modulation arguments, if given, are base-rate
+        //  per-sample linear factors around 1.0: `behaviorMod` scales the
+        //  engine's pre-gain, `residualMod` scales the nonlinear residual the
+        //  engine contributes. Each is upsampled linearly to the active factor.
         void process (juce::AudioBuffer<float>& buffer,
-                      const float* behaviorMod[2] = nullptr) noexcept;
+                      const float* behaviorMod[2] = nullptr,
+                      const float* residualMod[2] = nullptr) noexcept;
 
         //  Wet-path latency at the base rate. CONSTANT across all qualities,
         //  and an exact integer.
@@ -89,7 +92,8 @@ namespace fourcolor
         //  running in the same block see the same colour-fade position.
         void processPath (int qualityIndex, int bankIndex,
                           juce::AudioBuffer<float>& buffer, int numSamples,
-                          const float* const* mod, int colourFadeLeft) noexcept;
+                          const float* const* mod, const float* const* resMod,
+                          int colourFadeLeft) noexcept;
 
         void armBank (int bankIndex, int qualityIndex) noexcept;
 
@@ -128,7 +132,8 @@ namespace fourcolor
         int qualityPreRoll = 0;
 
         juce::AudioBuffer<float> fadeScratch;      // oversampled copy, outgoing colour
-        juce::AudioBuffer<float> modScratch;       // oversampled behavior modulation
+        juce::AudioBuffer<float> modScratch;       // oversampled pre-gain modulation
+        juce::AudioBuffer<float> resScratch;       // oversampled residual modulation
         juce::AudioBuffer<float> qualityScratch;   // base-rate copy, outgoing quality
         float drivePercent = 25.0f;
         ColorContext bandContext;

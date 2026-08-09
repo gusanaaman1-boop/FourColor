@@ -27,8 +27,10 @@ namespace fourcolor
         slowRel = onePoleCoeff (sampleRate, slowRelMs[b] * 0.001f);
 
         //  Modulation smoothing: ~3 ms, fast enough to catch a transient's
-        //  head, slow enough to be click-free.
+        //  head, slow enough to be click-free. The residual curve reuses it
+        //  when opening and falls far faster when closing - see residualFall.
         modSmooth = onePoleCoeff (sampleRate, 0.003f);
+        residualFall = onePoleCoeff (sampleRate, 0.0003f);
 
         //  BODY's reference envelope: rises with the material, falls slowly
         //  enough to survive a whole decay. Falling fast would make the
@@ -46,11 +48,11 @@ namespace fourcolor
     void BehaviorDetector::reset()
     {
         fastEnv = slowEnv = referenceEnv = 0.0f;
-        modState = 1.0f;
+        modState = residualState = 1.0f;
     }
 
     void BehaviorDetector::writeModulation (const juce::AudioBuffer<float>& bandInput,
-                                            float* modOut, int n) noexcept
+                                            float* driveOut, float* residualOut, int n) noexcept
     {
         const int chans = bandInput.getNumChannels();
         const float* l = bandInput.getReadPointer (0);
@@ -80,7 +82,9 @@ namespace fourcolor
             const float transient = (fastEnv - slowEnv) / (fastEnv + slowEnv + 1.0e-6f);
             const float t = juce::jlimit (0.0f, 1.0f, transient * 2.0f);
 
+            //  ATTACK is pre-drive only, exactly as before.
             float targetDb = maxModDb * attackAmount * t;
+            float residualDb = 0.0f;
 
             //  --- BODY ------------------------------------------------------
             //  How far below its own recent reference the signal has fallen,
@@ -97,26 +101,70 @@ namespace fourcolor
                 const float protection =
                     juce::jlimit (0.0f, 1.0f, (levelDb - bodyFloorDb) / bodyFadeDb);
 
-                //  The transient itself is deliberately excluded. BODY is not
-                //  allowed to make the hit louder - that is ATTACK's job, and
-                //  the brief asks for the initial attack window to stay put.
-                const float bodyOnly = 1.0f - t;
+                //  The transient itself is deliberately excluded: BODY is not
+                //  allowed to make the hit louder, that is ATTACK's job.
+                //
+                //  But it must stand aside for an ONSET, not for any envelope
+                //  ripple. ATTACK's `t` is deliberately sensitive - it has to
+                //  catch the head of a stick hit - and on sustained material
+                //  that sensitivity works against BODY: a vibrato'd vocal read
+                //  t ~ 0.3 and a beating pad t ~ 0.2, closing BODY to 42% and
+                //  48% on sources that are nothing BUT body. The lift then came
+                //  out under target on exactly the material the control exists
+                //  for.
+                //
+                //  So BODY uses a thresholded version of the same measure. Only
+                //  the top half counts as an onset, which a real hit reaches
+                //  comfortably (the attack-window check still reads 0.00 dB)
+                //  while periodic ripple never does.
+                const float onset = juce::jlimit (0.0f, 1.0f, (t - 0.5f) * 2.0f);
+
+                //  ...plus a causal guard the envelopes cannot provide. The
+                //  fast/slow difference needs a few milliseconds to notice a
+                //  hit, and in the LOW band (6 ms fast attack) that is long
+                //  enough for BODY - still open from the previous decay - to
+                //  reach the front of the next transient. Measured on a kick
+                //  train, the hit's crunch rose 3.6 dB under full BODY: not a
+                //  level change, but a change to the hit, which is precisely
+                //  what this control promises not to do.
+                //
+                //  The raw magnitude against the slow envelope catches a hit on
+                //  its FIRST sample. A steady tone never exceeds about 1.4x its
+                //  own slow envelope, so 2x cannot fire on sustained material;
+                //  and because the residual smoother closes in 0.3 ms and
+                //  reopens over 3 ms, one sample of closure holds long enough
+                //  for the envelope measure above to take over.
+                const float jump = mag / (slowEnv + 1.0e-6f);
+                const float instantOnset = juce::jlimit (0.0f, 1.0f, jump - 2.0f);
+
+                const float bodyOnly = 1.0f - juce::jmax (onset, instantOnset);
 
                 //  Baseline on all sustained material, plus the deficit term.
                 const float shape = bodyBaseline
                                   + (1.0f - bodyBaseline) * (deficitDb / bodyRangeDb);
 
-                targetDb += maxBodyDb * bodyAmount * shape * protection * bodyOnly;
+                //  One mask, two mechanisms. They open and close together, so
+                //  from the outside BODY is still a single continuous control.
+                const float bodyMask = bodyAmount * shape * protection * bodyOnly;
+
+                targetDb   += bodyDriveShareDb    * bodyMask;
+                residualDb  = bodyResidualShareDb * bodyMask;
             }
 
-            //  dB-linear modulation of the pre-gain, then one-pole smoothing.
-            //  At amount 0 both depths are 0, so the target is unity and
-            //  modState RELAXES to 1.0 through the same smoother instead of
-            //  snapping - which is what makes moving the control to zero
-            //  click-free.
-            const float target = std::exp (targetDb * 0.115129254f);   // ln(10)/20
-            modState += modSmooth * (target - modState);
-            modOut[i] = modState;
+            //  dB-linear modulation, then one-pole smoothing. At amount 0 both
+            //  depths are 0, so both targets are unity and the states RELAX to
+            //  1.0 through the same smoother instead of snapping - which is
+            //  what makes moving the control to zero click-free.
+            constexpr float lnTenOverTwenty = 0.115129254f;
+
+            const float driveTarget = std::exp (targetDb * lnTenOverTwenty);
+            modState += modSmooth * (driveTarget - modState);
+            driveOut[i] = modState;
+
+            const float residualTarget = std::exp (residualDb * lnTenOverTwenty);
+            residualState += (residualTarget < residualState ? residualFall : modSmooth)
+                                 * (residualTarget - residualState);
+            residualOut[i] = residualState;
         }
     }
 }

@@ -64,10 +64,13 @@ namespace fourcolor
 
         const ColorContext& getContext() const noexcept { return context; }
 
-        //  Per-band Behavior modulation multiplies the effective pre-gain.
-        //  1.0 = neutral; bounded to about +/-6 dB by the caller.
+        //  Per-band Behavior modulation. `preGainMod` multiplies the effective
+        //  pre-gain; `residualMod` multiplies the NONLINEAR RESIDUAL the engine
+        //  contributes. Both are per-sample linear factors around 1.0, at the
+        //  oversampled rate, and both are optional.
         virtual void processBlock (float* data, int numSamples, int channel,
-                                   const float* preGainMod = nullptr) noexcept = 0;
+                                   const float* preGainMod = nullptr,
+                                   const float* residualMod = nullptr) noexcept = 0;
 
         //  Static make-up so Drive changes colour more than loudness. Derived
         //  from each engine's memoryless curve at a -12 dBFS reference input.
@@ -89,10 +92,23 @@ namespace fourcolor
         //  The one place the dry/wet contract is expressed. `wet` is the
         //  engine's compensated output; at Drive 0 this returns x untouched,
         //  bit for bit, with no residual, no gate and no DC filtering.
-        float blend (float x, float wet) noexcept
+        //
+        //  Written out, this is  x + e * r * (nonlinear residual), so
+        //  `residualGain` scales ONLY what the shaper added and never the clean
+        //  signal underneath it. That is what makes BODY's second mechanism
+        //  possible: once a source is already deep in saturation, more pre-gain
+        //  buys almost no new harmonic content, but the content that is there
+        //  can still be made more audible relative to the clean signal.
+        //
+        //  Doing it here rather than after the tone stage matters. Here `x` is
+        //  the engine's own input, so the difference is purely nonlinear
+        //  product; after ToneStage::processPost the difference would also
+        //  contain the tone filter's linear response, and scaling it would turn
+        //  BODY into a hidden second Tone control at Tone +/-100.
+        float blend (float x, float wet, float residualGain = 1.0f) noexcept
         {
             const float e = engageSmoothed.getNextValue();
-            return x + e * (wet * compensation - x);
+            return x + e * residualGain * (wet * compensation - x);
         }
 
         virtual void prepareInternals() = 0;
@@ -135,7 +151,7 @@ namespace fourcolor
     {
     public:
         ColorType type() const noexcept override { return ColorType::warm; }
-        void processBlock (float*, int, int, const float*) noexcept override;
+        void processBlock (float*, int, int, const float*, const float*) noexcept override;
 
     protected:
         void prepareInternals() override;
@@ -154,7 +170,7 @@ namespace fourcolor
     {
     public:
         ColorType type() const noexcept override { return ColorType::iron; }
-        void processBlock (float*, int, int, const float*) noexcept override;
+        void processBlock (float*, int, int, const float*, const float*) noexcept override;
 
     protected:
         void prepareInternals() override;
@@ -180,7 +196,7 @@ namespace fourcolor
     {
     public:
         ColorType type() const noexcept override { return ColorType::bite; }
-        void processBlock (float*, int, int, const float*) noexcept override;
+        void processBlock (float*, int, int, const float*, const float*) noexcept override;
 
     protected:
         void prepareInternals() override;
@@ -205,7 +221,7 @@ namespace fourcolor
     {
     public:
         ColorType type() const noexcept override { return ColorType::fuzz; }
-        void processBlock (float*, int, int, const float*) noexcept override;
+        void processBlock (float*, int, int, const float*, const float*) noexcept override;
 
     protected:
         void prepareInternals() override;

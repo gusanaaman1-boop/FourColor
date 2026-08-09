@@ -44,6 +44,7 @@ namespace fourcolor
         //  Both scratch buffers live in the oversampled domain: 8x worst case.
         fadeScratch.setSize (channels, maxBlock * 8);
         modScratch.setSize (channels, maxBlock * 8);
+        resScratch.setSize (channels, maxBlock * 8);
         qualityScratch.setSize (channels, maxBlock);
 
         fadeLengthSamples = juce::jmax (1, (int) (0.015 * baseRate));
@@ -194,7 +195,8 @@ namespace fourcolor
 
     void NonlinearStage::processPath (int qualityIndex, int bankIndex,
                                       juce::AudioBuffer<float>& buffer, int n,
-                                      const float* const* mod, int colourFadeLeft) noexcept
+                                      const float* const* mod, const float* const* resMod,
+                                      int colourFadeLeft) noexcept
     {
         auto& os = *oversamplers[qualityIndex];
         const int factor = (int) os.getOversamplingFactor();
@@ -211,7 +213,7 @@ namespace fourcolor
         {
             for (int c = 0; c < chans; ++c)
                 incoming.processBlock (osBlock.getChannelPointer ((size_t) c),
-                                       osSamples, c, mod[c]);
+                                       osSamples, c, mod[c], resMod[c]);
         }
         else
         {
@@ -227,8 +229,8 @@ namespace fourcolor
                 auto* s = fadeScratch.getWritePointer (c);
                 juce::FloatVectorOperations::copy (s, d, osSamples);
 
-                incoming.processBlock (d, osSamples, c, mod[c]);
-                outgoing.processBlock (s, osSamples, c, mod[c]);
+                incoming.processBlock (d, osSamples, c, mod[c], resMod[c]);
+                outgoing.processBlock (s, osSamples, c, mod[c], resMod[c]);
 
                 int left = leftAtStart;
                 for (int i = 0; i < osSamples && left > 0; ++i)
@@ -263,7 +265,8 @@ namespace fourcolor
     }
 
     void NonlinearStage::process (juce::AudioBuffer<float>& buffer,
-                                  const float* behaviorMod[2]) noexcept
+                                  const float* behaviorMod[2],
+                                  const float* residualMod[2]) noexcept
     {
         const int n = buffer.getNumSamples();
         if (n == 0)
@@ -274,33 +277,42 @@ namespace fourcolor
         //  Upsample the (smooth, low-frequency) Behavior modulation linearly,
         //  at the ACTIVE factor. During a quality fade the outgoing path uses
         //  the same curve resampled to its own factor.
-        const float* mod[2] = { nullptr, nullptr };
+        const float* mod[2]    = { nullptr, nullptr };
+        const float* resMod[2] = { nullptr, nullptr };
+
+        auto upsampleInto = [&] (const float* src, float* dest, int factor, int osSamples)
+        {
+            for (int i = 0; i < osSamples; ++i)
+            {
+                const float pos = (float) i / (float) factor;
+                const int i0 = juce::jmin ((int) pos, n - 1);
+                const int i1 = juce::jmin (i0 + 1, n - 1);
+                const float frac = pos - (float) i0;
+                dest[i] = src[i0] + frac * (src[i1] - src[i0]);
+            }
+        };
+
         auto buildMod = [&] (int factor)
         {
-            if (behaviorMod == nullptr)
-                return;
-
             const int osSamples = n * factor;
+
             for (int c = 0; c < chans; ++c)
             {
-                if (behaviorMod[c] == nullptr)
+                mod[c] = resMod[c] = nullptr;
+
+                if (behaviorMod != nullptr && behaviorMod[c] != nullptr)
                 {
-                    mod[c] = nullptr;
-                    continue;
+                    auto* m = modScratch.getWritePointer (c);
+                    upsampleInto (behaviorMod[c], m, factor, osSamples);
+                    mod[c] = m;
                 }
 
-                auto* m = modScratch.getWritePointer (c);
-                const float* src = behaviorMod[c];
-
-                for (int i = 0; i < osSamples; ++i)
+                if (residualMod != nullptr && residualMod[c] != nullptr)
                 {
-                    const float pos = (float) i / (float) factor;
-                    const int i0 = juce::jmin ((int) pos, n - 1);
-                    const int i1 = juce::jmin (i0 + 1, n - 1);
-                    const float frac = pos - (float) i0;
-                    m[i] = src[i0] + frac * (src[i1] - src[i0]);
+                    auto* m = resScratch.getWritePointer (c);
+                    upsampleInto (residualMod[c], m, factor, osSamples);
+                    resMod[c] = m;
                 }
-                mod[c] = m;
             }
         };
 
@@ -309,7 +321,7 @@ namespace fourcolor
         if (qualityFadeLeft <= 0)
         {
             buildMod ((int) oversamplers[activeQuality]->getOversamplingFactor());
-            processPath (activeQuality, activeBank, buffer, n, mod, colourFadeAtStart);
+            processPath (activeQuality, activeBank, buffer, n, mod, resMod, colourFadeAtStart);
         }
         else
         {
@@ -322,11 +334,11 @@ namespace fourcolor
                                                    buffer.getReadPointer (c), n);
 
             buildMod ((int) oversamplers[outgoingQuality]->getOversamplingFactor());
-            processPath (outgoingQuality, outgoingBank, qualityScratch, n, mod, colourFadeAtStart);
+            processPath (outgoingQuality, outgoingBank, qualityScratch, n, mod, resMod, colourFadeAtStart);
 
             //  ...the incoming path on the block itself.
             buildMod ((int) oversamplers[activeQuality]->getOversamplingFactor());
-            processPath (activeQuality, activeBank, buffer, n, mod, colourFadeAtStart);
+            processPath (activeQuality, activeBank, buffer, n, mod, resMod, colourFadeAtStart);
 
             //  Equal-power blend, after a pre-roll that lets the incoming path
             //  fill its oversampler, pad and engine state at zero weight.

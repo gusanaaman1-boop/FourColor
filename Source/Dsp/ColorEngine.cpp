@@ -115,6 +115,16 @@ namespace fourcolor
         compensation = std::isfinite (raw) ? juce::jlimit (0.0631f, 3.98f, raw) : 1.0f;
     }
 
+    namespace
+    {
+        //  Residual reinforcement factor for one sample, 1.0 when the caller
+        //  supplied no curve.
+        inline float rg (const float* residualMod, int i) noexcept
+        {
+            return residualMod != nullptr ? residualMod[i] : 1.0f;
+        }
+    }
+
     // --- WARM -----------------------------------------------------------------
     namespace
     {
@@ -148,7 +158,8 @@ namespace fourcolor
         return rationalSoft (u + bias) - biasOut;
     }
 
-    void WarmEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    void WarmEngine::processBlock (float* data, int n, int channel, const float* mod,
+                                    const float* resMod) noexcept
     {
         auto& c = ch[channel];
 
@@ -164,7 +175,7 @@ namespace fourcolor
             const float sag   = 1.0f - sagDepth * juce::jmin (1.0f, level);
 
             const float u = x * g * sag + bias;
-            data[i] = blend (x, c.dc.process (rationalSoft (u) - biasOut));
+            data[i] = blend (x, c.dc.process (rationalSoft (u) - biasOut), rg (resMod, i));
         }
     }
 
@@ -211,7 +222,8 @@ namespace fourcolor
         return std::tanh (v);
     }
 
-    void IronEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    void IronEngine::processBlock (float* data, int n, int channel, const float* mod,
+                                    const float* resMod) noexcept
     {
         auto& c = ch[channel];
 
@@ -228,7 +240,7 @@ namespace fourcolor
             const float y = std::tanh (v);
 
             c.lastOut = y;
-            data[i] = blend (data[i], c.dc.process (y));
+            data[i] = blend (data[i], c.dc.process (y), rg (resMod, i));
         }
     }
 
@@ -282,7 +294,8 @@ namespace fourcolor
         return -(1.0f - std::exp (1.3f * h * u)) / (1.3f * h);
     }
 
-    void BiteEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    void BiteEngine::processBlock (float* data, int n, int channel, const float* mod,
+                                    const float* resMod) noexcept
     {
         auto& c = ch[channel];
 
@@ -306,7 +319,7 @@ namespace fourcolor
             //  is "distorted brighter" rather than just "brighter".
             y -= deemph * c.postHp.processHigh (y);
 
-            data[i] = blend (x, c.dc.process (y));
+            data[i] = blend (x, c.dc.process (y), rg (resMod, i));
         }
     }
 
@@ -367,7 +380,8 @@ namespace fourcolor
         return juce::jlimit (-1.0f, 1.0f, v);
     }
 
-    void FuzzEngine::processBlock (float* data, int n, int channel, const float* mod) noexcept
+    void FuzzEngine::processBlock (float* data, int n, int channel, const float* mod,
+                                    const float* resMod) noexcept
     {
         auto& c = ch[channel];
         const float t2 = gateThreshold * gateThreshold;
@@ -392,7 +406,7 @@ namespace fourcolor
 
             //  At Drive 0 the blend returns x, so the gate is inaudible there
             //  even though its envelope keeps tracking.
-            data[i] = blend (x, c.dc.process (v * gate));
+            data[i] = blend (x, c.dc.process (v * gate), rg (resMod, i));
         }
     }
 

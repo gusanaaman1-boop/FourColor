@@ -15,7 +15,7 @@ namespace fourcolor
         space.prepare (sampleRate, maxBlockSize, channels, index);
 
         cleanBuffer.setSize (channels, maxBlockSize);
-        behaviorMod.setSize (1, maxBlockSize);
+        behaviorMod.setSize (2, maxBlockSize);
 
         //  Sized for the worst oversampler latency plus interpolation headroom.
         cleanDelay.setMaximumDelayInSamples ((int) std::ceil (nonlinear.getMaxLatencySamples()) + 8);
@@ -114,9 +114,12 @@ namespace fourcolor
         //  Always written, even at amount 0: the envelopes are the detector's
         //  memory, and freezing them means engaging the control starts from a
         //  picture of whatever was playing when it was last touched.
-        behavior.writeModulation (buffer, behaviorMod.getWritePointer (0), n);
+        behavior.writeModulation (buffer, behaviorMod.getWritePointer (0),
+                                  behaviorMod.getWritePointer (1), n);
         const float* modPtrs[2] = { behaviorMod.getReadPointer (0),
                                     behaviorMod.getReadPointer (0) };
+        const float* resPtrs[2] = { behaviorMod.getReadPointer (1),
+                                    behaviorMod.getReadPointer (1) };
 
         //  Drive is smoothed at block granularity: the engines' curves are
         //  continuous in drive, so 32-512 sample steps of a smoothed value
@@ -125,7 +128,7 @@ namespace fourcolor
 
         //  Wet path: pre-tone -> oversampled colour -> post-tone.
         tone.processPre (buffer);
-        nonlinear.process (buffer, modPtrs);
+        nonlinear.process (buffer, modPtrs, resPtrs);
         tone.processPost (buffer);
 
         //  Harmonic Space: adds the diffused nonlinear residual to the wet

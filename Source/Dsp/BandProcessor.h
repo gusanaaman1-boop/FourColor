@@ -78,7 +78,8 @@ namespace fourcolor
         ToneStage tone;
         BehaviorDetector behavior;
         HarmonicSpace space;
-        juce::AudioBuffer<float> behaviorMod;   // one stereo-linked curve
+        //  Two stereo-linked Behavior curves: [0] pre-gain, [1] residual gain.
+        juce::AudioBuffer<float> behaviorMod;
 
         //  Thiran: allpass interpolation, magnitude-flat at fractional delays.
         //  (Lagrange3rd was measured drooping -0.44 dB at 12 kHz on the 59.5
