@@ -163,7 +163,7 @@ namespace fourcolor::ui
                 band.powerFade += juce::jlimit (-step, step, target - band.powerFade);
                 needsRepaint = true;
             }
-            else if (band.powerFade != target)
+            else if (! juce::exactlyEqual (band.powerFade, target))
             {
                 band.powerFade = target;
                 needsRepaint = true;
@@ -182,7 +182,9 @@ namespace fourcolor::ui
 
     void BandHeaders::setCutFrequencies (float f1, float f2, float f3)
     {
-        if (cutHz[0] != f1 || cutHz[1] != f2 || cutHz[2] != f3)
+        if (! juce::exactlyEqual (cutHz[0], f1)
+            || ! juce::exactlyEqual (cutHz[1], f2)
+            || ! juce::exactlyEqual (cutHz[2], f3))
         {
             cutHz[0] = f1; cutHz[1] = f2; cutHz[2] = f3;
             resized();

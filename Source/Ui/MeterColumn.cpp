@@ -126,7 +126,7 @@ namespace fourcolor::ui
 
         //  Two bars, wide enough apart to read L from R.
         const float gap = 3.0f;
-        const float barW = (barsArea.getWidth() - gap) * 0.5f;
+        const float barW = ((float) barsArea.getWidth() - gap) * 0.5f;
 
         for (int c = 0; c < 2; ++c)
         {

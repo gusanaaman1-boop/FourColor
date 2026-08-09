@@ -1266,8 +1266,10 @@ static void testEngineMatrix()
 
     //  Every configuration must produce finite audio at a sane level and must
     //  not allocate on the audio thread.
-    const double rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
-    const int blocks[] = { 1, 16, 32, 64, 128, 512, 1024, 2048 };
+    //  Every rate and block size the RC brief names, including 176.4 kHz and
+    //  the 256 that sits between the two most common host defaults.
+    const double rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 };
+    const int blocks[] = { 1, 16, 32, 64, 128, 256, 512, 1024, 2048 };
 
     for (double sr : rates)
     {
