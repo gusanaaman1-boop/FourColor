@@ -48,10 +48,11 @@ jobs:
 
       - name: Run the DSP and state suite
         shell: cmd
-        # One check is knowingly red (docs/REPORT-RC.md section 5), so the suite
-        # exits non-zero by design. continue-on-error keeps the build red - the
-        # information - while still letting the artefact upload happen.
-        continue-on-error: true
+        # No continue-on-error. It was here because one acceptance check was
+        # knowingly red, which meant a genuine regression could not turn this
+        # job red either - the safety net was switched off to tolerate a known
+        # hole. The suite is at 0 failures as of the RC round, so a non-zero
+        # exit is now information again and must stop the build.
         run: build\FourColorTests_artefacts\${{ matrix.config }}\FourColorTests.exe
 
       - name: Package the installer folder

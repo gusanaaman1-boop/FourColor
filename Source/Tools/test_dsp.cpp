@@ -5506,6 +5506,185 @@ static void testPowerSoloMuteSemantics()
     }
 }
 
+
+// ================================================================================
+//  Phase 6 (RC): 100 randomised sessions with the allocation tripwire armed
+//
+//  A single allocation was observed once inside processBlock on a Windows
+//  Release build and never reproduced. One event proves nothing on its own, but
+//  leaving it unexplained is not an option either, so this walks the whole
+//  configuration space rather than the one path the ordinary allocation test
+//  takes: every sample rate, every block size the hosts here actually use,
+//  mono and stereo, all four oversampling factors, all four colours, all
+//  sixteen Power masks, both ends of Shape, Space at its extremes, and quality
+//  and colour switches mid-stream - which are the two things that swap engine
+//  banks while audio is running.
+//
+//  The tripwire is armed only AFTER each session's warm-up, because prepare()
+//  is supposed to allocate; that is where every buffer in the plug-in comes
+//  from. What must never allocate is the steady state.
+//
+//  The deterministic seed matters: when this does fire on someone else's
+//  machine, the session index is enough to reproduce the exact configuration.
+// ================================================================================
+static void testAudioThreadAllocationStress()
+{
+    section ("Phase 6: 100 randomised sessions allocate nothing on the audio thread");
+
+    constexpr int sessions = 100;
+
+    const double rates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
+    const int blocks[] = { 1, 16, 64, 128, 512, 1024, 2048 };
+    const Quality qualities[] = { Quality::draft, Quality::normal,
+                                  Quality::high, Quality::ultra };
+
+    int worstSession = -1;
+    int totalAllocations = 0;
+    size_t worstSize = 0;
+
+    for (int session = 0; session < sessions; ++session)
+    {
+        //  Deterministic per session, so a failure names its own repro.
+        Random rng (session * 2654435761u + 1u);
+
+        const double sr = rates[rng.nextInt (numElementsInArray (rates))];
+        const int block = blocks[rng.nextInt (numElementsInArray (blocks))];
+        const int chans = rng.nextBool() ? 2 : 1;
+        const int mask = session % 16;                 // every Power mask, in turn
+        const bool editorOpen = (session % 3) == 0;
+
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (chans, chans, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        std::unique_ptr<AudioProcessorEditor> editor;
+        if (editorOpen)
+        {
+            editor.reset (proc.createEditor());
+            editor->setSize (980, 620);
+        }
+
+        auto set = [&] (const String& id, float plain)
+        {
+            if (auto* p = proc.apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (plain));
+        };
+
+        for (int b = 0; b < numBands; ++b)
+        {
+            set (param::band (b, param::color), (float) rng.nextInt (4));
+            set (param::band (b, param::drive), rng.nextFloat() * 100.0f);
+            set (param::band (b, param::behavior), rng.nextFloat() * 200.0f - 100.0f);
+            set (param::band (b, param::tone), rng.nextFloat() * 200.0f - 100.0f);
+            set (param::band (b, param::space), rng.nextBool() ? 0.0f
+                                              : (rng.nextBool() ? 50.0f : 100.0f));
+            set (param::band (b, param::bypass), (mask & (1 << b)) != 0 ? 1.0f : 0.0f);
+        }
+        set (param::quality, (float) (int) qualities[rng.nextInt (4)]);
+        set (param::autoLevel, rng.nextBool() ? 1.0f : 0.0f);
+
+        AudioBuffer<float> buffer (chans, block);
+        MidiBuffer midi;
+        int s = 0;
+
+        auto fill = [&]
+        {
+            for (int i = 0; i < block; ++i, ++s)
+            {
+                //  Broadband and transient-rich, so every detector, gate and
+                //  envelope in the plug-in is actually exercised.
+                const double t = (double) s / sr;
+                const double beat = std::fmod (t, 0.35);
+                float v = 0.0f;
+                for (double f : { 55.0, 220.0, 1400.0, 7000.0 })
+                    v += 0.12f * (float) std::sin (MathConstants<double>::twoPi * f * t);
+                v += 0.5f * (float) (std::exp (-beat * 30.0)
+                                         * std::sin (MathConstants<double>::twoPi * 90.0 * beat));
+                for (int c = 0; c < chans; ++c)
+                    buffer.setSample (c, i, c == 0 ? v : 0.85f * v);
+            }
+        };
+
+        //  Warm up: smoothers, oversampler state, spectrum FIFO, editor timers.
+        for (int i = 0; i < 24; ++i)
+        {
+            fill();
+            proc.processBlock (buffer, midi);
+        }
+        if (editorOpen)
+            MessageManager::getInstance()->runDispatchLoopUntil (30);
+
+        //  --- armed, around processBlock and nothing else ---------------------
+        //  setValueNotifyingHost is message-thread work: it builds parameter
+        //  IDs as juce::Strings and posts change messages, and it allocates
+        //  every time. Leaving the tripwire on across those calls counted the
+        //  TEST's allocations and reported them as the plug-in's - seven per
+        //  session, all 27 bytes, all of them a parameter ID string.
+        allocationCount.store (0);
+        firstAllocSize.store (0);
+        firstAllocPhase.store (-1);
+        allocPhase.store (session);
+
+        for (int i = 0; i < 40; ++i)
+        {
+            //  Switch colour, quality and Power mid-stream: these are the
+            //  operations that arm a second engine bank and cross-fade between
+            //  two oversamplers while audio is running. Done with the tripwire
+            //  DOWN, so what is measured is the block that has to absorb them.
+            if (i == 10)
+                set (param::band (rng.nextInt (numBands), param::color),
+                     (float) rng.nextInt (4));
+            if (i == 20)
+                set (param::quality, (float) (int) qualities[rng.nextInt (4)]);
+            if (i == 30)
+                set (param::band (rng.nextInt (numBands), param::bypass),
+                     rng.nextBool() ? 1.0f : 0.0f);
+
+            fill();
+
+            trackAllocations.store (true);
+            proc.processBlock (buffer, midi);
+            trackAllocations.store (false);
+        }
+
+        const int count = allocationCount.load();
+        if (count > 0)
+        {
+            totalAllocations += count;
+            if (worstSession < 0)
+            {
+                worstSession = session;
+                worstSize = firstAllocSize.load();
+            }
+
+            std::printf ("      session %d ALLOCATED %d time(s), first %d bytes"
+                         "  [%.0f Hz, block %d, %d ch, power mask %d, editor %s]\n",
+                         session, count, (int) firstAllocSize.load(), sr, block, chans,
+                         mask, editorOpen ? "open" : "closed");
+        }
+
+        //  Draining the editor's message queue must happen before it dies.
+        if (editorOpen)
+            MessageManager::getInstance()->runDispatchLoopUntil (10);
+        editor.reset();
+
+        proc.releaseResources();
+    }
+
+    if (totalAllocations == 0)
+        std::printf ("      %d/%d sessions clean across 4 sample rates, 7 block sizes,\n"
+                     "      mono and stereo, 4 qualities, 4 colours, all 16 power masks\n",
+                     sessions, sessions);
+
+    check (totalAllocations == 0,
+           "no session allocates on the audio thread ("
+               + String (totalAllocations) + " allocations"
+               + (worstSession >= 0 ? ", first in session " + String (worstSession)
+                                          + " at " + String ((int) worstSize) + " bytes"
+                                    : String())
+               + ")");
+}
+
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -5517,6 +5696,7 @@ int main()
     testStateVersioningAndMigration();
     testPassthroughAndSafety();
     testNoAllocationInProcess();
+    testAudioThreadAllocationStress();
 
     testCrossoverRecombination();
     testCrossoverNull();
