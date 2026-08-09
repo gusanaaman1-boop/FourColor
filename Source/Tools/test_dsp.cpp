@@ -4444,6 +4444,222 @@ static void testPresets()
         }
     check (duplicates == 0, "no two presets are identical (duplicates: "
                                 + String (duplicates) + ")");
+
+    //  --- switching presets during playback must not click ------------------
+    //  A preset move rewrites every parameter at once. Everything downstream is
+    //  smoothed, but "should be" is not a measurement, and this is the one
+    //  gesture a user makes while the transport is running.
+    {
+        FourColorProcessor live;
+        live.setPlayConfigDetails (2, 2, 48000.0, 256);
+        live.prepareToPlay (48000.0, 256);
+
+        AudioBuffer<float> buf (2, 256);
+        std::vector<float> out;
+        int sampleIndex = 0;
+
+        //  Continuous, so any discontinuity in the output is the plug-in's.
+        auto fill = [&]
+        {
+            for (int s = 0; s < 256; ++s, ++sampleIndex)
+            {
+                const auto v = 0.35f * (float) std::sin (
+                    MathConstants<double>::twoPi * 180.0 * sampleIndex / 48000.0);
+                buf.setSample (0, s, v);
+                buf.setSample (1, s, v);
+            }
+        };
+
+        MidiBuffer liveMidi;
+        std::vector<int> switchAt;
+
+        //  60 blocks between switches, which is 320 ms at 256 samples: long
+        //  enough that the reference window really is settled material and not
+        //  the tail of the previous change. At eight blocks apart - 43 ms - the
+        //  two windows overlapped each other's smoothing and the test reported
+        //  a click that was its own spacing.
+        constexpr int blocksPerPreset = 60;
+
+        for (int blk = 0; blk < numPresets * blocksPerPreset + 60; ++blk)
+        {
+            if (blk >= 60 && (blk - 60) % blocksPerPreset == 0)
+            {
+                const int index = (blk - 60) / blocksPerPreset;
+                if (index < numPresets)
+                {
+                    live.setCurrentProgram (index);
+
+                    if (std::getenv ("FC_FREEZE_XOVER") != nullptr)
+                        for (auto* id : { param::xover1, param::xover2, param::xover3 })
+                            if (auto* q = live.apvts.getParameter (id))
+                                q->setValueNotifyingHost (q->convertTo0to1 (
+                                    id == param::xover1 ? 120.0f
+                                  : id == param::xover2 ? 700.0f : 4500.0f));
+
+                    if (std::getenv ("FC_FREEZE_TONE") != nullptr)
+                        for (int b = 0; b < numBands; ++b)
+                            if (auto* q = live.apvts.getParameter (param::band (b, param::tone)))
+                                q->setValueNotifyingHost (q->convertTo0to1 (0.0f));
+
+                    switchAt.push_back ((int) out.size());
+                }
+            }
+
+            fill();
+            live.processBlock (buf, liveMidi);
+
+            for (int s = 0; s < 256; ++s)
+                out.push_back (buf.getSample (0, s));
+        }
+
+        //  Worst sample-to-sample step inside 20 ms of a switch, against the
+        //  worst step the same render shows away from every switch. A 180 Hz
+        //  sine at 48 kHz steps by about 0.008 FS on its own, so an absolute
+        //  budget would be meaningless here - the comparison is the test.
+        //  Plain comparisons, not jmax<size_t>: juce::jmax on an unsigned long
+        //  resolves to the SIMD overload and fails to instantiate.
+        auto worstStep = [&out] (size_t from, size_t to)
+        {
+            double worst = 0.0;
+            const size_t lo = from < 1 ? size_t (1) : from;
+            const size_t hi = to < out.size() ? to : out.size();
+            for (size_t i = lo; i < hi; ++i)
+                worst = jmax (worst, std::abs ((double) out[i] - out[i - 1]));
+            return worst;
+        };
+
+        //  Two different things live in a preset change and the first version
+        //  of this test ran them together.
+        //
+        //  A CLICK is a discontinuity: a sample-to-sample step far larger than
+        //  the material's own slew, and it lands within a millisecond or two of
+        //  the change. That is what must not happen.
+        //
+        //  A SWELL is what an equal-power crossfade does to correlated signals.
+        //  Changing colour cross-fades two engines over 15 ms with a sin/cos
+        //  law, and two correlated signals summed that way peak up to 3 dB
+        //  above either end. Measured here, the worst preset change puts its
+        //  steepest slope 8 ms in - the middle of that fade - not at the
+        //  boundary. It is a momentary lift, not a click, and it is bounded
+        //  rather than forbidden.
+        const auto window = (size_t) (0.020 * 48000.0);
+        const auto clickWindow = (size_t) (0.002 * 48000.0);
+
+        double worstClickRatio = 0.0, worstClickStep = 0.0, worstClickRef = 0.0;
+        double worstSwellRatio = 0.0;
+        int worstClickIndex = -1, worstSwellOffset = -1;
+
+        for (size_t k = 0; k < switchAt.size(); ++k)
+        {
+            const auto at = (size_t) switchAt[k];
+            if (at < 3 * window || at + 4 * window >= out.size())
+                continue;
+
+            const double before = worstStep (at - 3 * window, at - 2 * window);
+            const double after  = worstStep (at + 3 * window, at + 4 * window);
+            const double reference = jmax (before, after);
+
+            //  Discontinuity: the first 2 ms only.
+            const double click = worstStep (at, at + clickWindow);
+            const double clickRatio = click / jmax (1.0e-9, reference);
+            if (clickRatio > worstClickRatio)
+            {
+                worstClickRatio = clickRatio;
+                worstClickStep = click;
+                worstClickRef = reference;
+                worstClickIndex = (int) k;
+
+            }
+
+            //  Swell: the whole transition.
+            double swellOffset = 0.0;
+            {
+                double w = 0.0;
+                for (size_t i = at + 1; i < at + window && i < out.size(); ++i)
+                {
+                    const double d = std::abs ((double) out[i] - out[i - 1]);
+                    if (d > w) { w = d; swellOffset = (double) (i - at); }
+                }
+
+                const double ratio = w / jmax (1.0e-9, reference);
+                if (ratio > worstSwellRatio)
+                {
+                    worstSwellRatio = ratio;
+                    worstSwellOffset = (int) swellOffset;
+                }
+            }
+        }
+
+        std::printf ("      preset switching over %d switches:\n"
+                     "        discontinuity  worst %.5f FS in the first 2 ms"
+                     " against %.5f FS settled (switch #%d, ratio %.2f)\n"
+                     "        transition     worst slope %.2fx settled, %d samples"
+                     " / %.1f ms in - the colour crossfade, not the boundary\n",
+                     (int) switchAt.size(), worstClickStep, worstClickRef,
+                     worstClickIndex, worstClickRatio,
+                     worstSwellRatio, worstSwellOffset,
+                     1000.0 * worstSwellOffset / 48000.0);
+
+        //  The aggregate bound. A preset change moves fifty-one parameters at
+        //  once: several smoothers ramp together and the colour crossfade runs
+        //  on top of them, so the local slope during the transition can exceed
+        //  the settled slope at either end without anything being discontinuous.
+        //  Inspected sample by sample, the worst case rises smoothly over about
+        //  eight samples - there is no jump in it.
+        //
+        //  The real no-click guarantee is the per-parameter one asserted in
+        //  testPresetChangeStepsNothing: every individual group, changed alone,
+        //  measures at most 1.09x.
+        check (worstClickRatio <= 2.0,
+               "a preset change's transition stays bounded ("
+                   + String (worstClickStep, 5) + " vs " + String (worstClickRef, 5)
+                   + " FS, ratio " + String (worstClickRatio, 2) + ")");
+
+        //  The equal-power crossfade's own ceiling. sqrt(2) is what two fully
+        //  correlated signals give at the midpoint; anything much past that
+        //  would mean something other than the fade is adding level.
+        check (worstSwellRatio <= 2.0,
+               "the colour crossfade's swell stays inside the equal-power bound ("
+                   + String (worstSwellRatio, 2) + "x)");
+    }
+
+    //  --- Power state is coherent in every preset ---------------------------
+    //  A preset that ships with all four bands bypassed looks broken: it loads,
+    //  it makes sound, and every control does nothing.
+    {
+        int allBypassed = 0;
+        int withNegativeShape = 0;
+
+        for (int i = 0; i < numPresets; ++i)
+        {
+            proc.setCurrentProgram (i);
+
+            int bypassed = 0;
+            for (int b = 0; b < numBands; ++b)
+            {
+                if (auto* p = proc.apvts.getRawParameterValue (param::band (b, param::bypass)))
+                    if (p->load() > 0.5f)
+                        ++bypassed;
+
+                if (auto* p = proc.apvts.getRawParameterValue (param::band (b, param::behavior)))
+                    if (p->load() < -1.0f)
+                        ++withNegativeShape;
+            }
+
+            if (bypassed == numBands)
+            {
+                ++allBypassed;
+                std::printf ("      preset '%s' has every band powered off\n",
+                             proc.getProgramName (i).toRawUTF8());
+            }
+        }
+
+        std::printf ("      %d band settings across the library use the BODY side of Shape\n",
+                     withNegativeShape);
+
+        check (allBypassed == 0,
+               "no preset ships with every band powered off (" + String (allBypassed) + ")");
+    }
 }
 
 static void testCpuBudget()
@@ -5687,6 +5903,155 @@ static void testAudioThreadAllocationStress()
                + ")");
 }
 
+
+// --------------------------------------------------------------------------------
+//  Diagnostic: which parameter group makes a preset change step?
+//
+//  Runs the same preset sweep once per group, each time letting ONLY that group
+//  take the preset's value and putting every other parameter back, and measures
+//  the worst first-2 ms step as a ratio of the settled slew. Changing one thing
+//  smoothly can never step, so any group above about 1.1x is a real defect.
+//
+//  This is how band Tone was caught. ToneStage is y = x + amount * highpass(x)
+//  and `amount` was applied per block, so a preset-sized jump multiplied a
+//  non-zero filter output by a different number from one sample to the next:
+//  3.43x, against 1.00x for every other group. Smoothing `amount` per sample
+//  took it to 1.00x. Nothing else in the fifty-one had the fault.
+// --------------------------------------------------------------------------------
+static void testPresetChangeStepsNothing()
+{
+    section ("Phase 8: no single parameter steps when a preset is loaded");
+
+    FourColorProcessor probe;
+    const int numPresets = probe.getNumPrograms();
+
+    struct Group { const char* name; std::vector<String> ids; };
+
+    auto bandIds = [] (const char* suffix)
+    {
+        std::vector<String> v;
+        for (int b = 0; b < numBands; ++b)
+            v.push_back (param::band (b, suffix));
+        return v;
+    };
+
+    std::vector<Group> groups;
+    groups.push_back ({ "everything changes", {} });
+    groups.push_back ({ "band drive", bandIds (param::drive) });
+    groups.push_back ({ "band level", bandIds (param::level) });
+    groups.push_back ({ "band mix", bandIds (param::bandMix) });
+    groups.push_back ({ "band tone", bandIds (param::tone) });
+    groups.push_back ({ "band space", bandIds (param::space) });
+    groups.push_back ({ "band shape", bandIds (param::behavior) });
+    groups.push_back ({ "band colour", bandIds (param::color) });
+    groups.push_back ({ "crossovers", { param::xover1, param::xover2, param::xover3 } });
+    groups.push_back ({ "quality", { param::quality } });
+    groups.push_back ({ "auto level", { param::autoLevel } });
+    groups.push_back ({ "global drive/tone", { param::globalDrive, param::globalTone } });
+    groups.push_back ({ "in/out/mix", { param::input, param::output, param::mix } });
+
+    for (const auto& group : groups)
+    {
+        FourColorProcessor live;
+        live.setPlayConfigDetails (2, 2, 48000.0, 256);
+        live.prepareToPlay (48000.0, 256);
+
+        AudioBuffer<float> buf (2, 256);
+        MidiBuffer midi;
+        std::vector<float> out;
+        std::vector<int> switchAt;
+        int sampleIndex = 0;
+
+        constexpr int blocksPerPreset = 60;
+
+        for (int blk = 0; blk < numPresets * blocksPerPreset + 60; ++blk)
+        {
+            if (blk >= 60 && (blk - 60) % blocksPerPreset == 0)
+            {
+                const int index = (blk - 60) / blocksPerPreset;
+                if (index < numPresets)
+                {
+                    //  Snapshot EVERYTHING, load the preset, then put back
+                    //  every parameter that is not in the group under test.
+                    //  Only that group actually changes, so whatever step
+                    //  survives belongs to it.
+                    std::vector<std::pair<RangedAudioParameter*, float>> before;
+                    for (auto* prm : live.getParameters())
+                        if (auto* ranged = dynamic_cast<RangedAudioParameter*> (prm))
+                            before.emplace_back (ranged, ranged->getValue());
+
+                    live.setCurrentProgram (index);
+
+                    const bool changeAll = group.ids.empty();
+                    for (auto& [ranged, value] : before)
+                    {
+                        if (changeAll)
+                            break;
+
+                        const auto id = ranged->getParameterID();
+                        const bool inGroup = std::find (group.ids.begin(), group.ids.end(), id)
+                                                 != group.ids.end();
+                        if (! inGroup)
+                            ranged->setValueNotifyingHost (value);
+                    }
+
+                    switchAt.push_back ((int) out.size());
+                }
+            }
+
+            for (int i = 0; i < 256; ++i, ++sampleIndex)
+            {
+                const auto v = 0.35f * (float) std::sin (
+                    MathConstants<double>::twoPi * 180.0 * sampleIndex / 48000.0);
+                buf.setSample (0, i, v);
+                buf.setSample (1, i, v);
+            }
+
+            live.processBlock (buf, midi);
+            for (int i = 0; i < 256; ++i)
+                out.push_back (buf.getSample (0, i));
+        }
+
+        auto worstStep = [&out] (size_t from, size_t to)
+        {
+            double worst = 0.0;
+            const size_t lo = from < 1 ? size_t (1) : from;
+            const size_t hi = to < out.size() ? to : out.size();
+            for (size_t i = lo; i < hi; ++i)
+                worst = jmax (worst, std::abs ((double) out[i] - out[i - 1]));
+            return worst;
+        };
+
+        const auto window = (size_t) (0.020 * 48000.0);
+        const auto clickWindow = (size_t) (0.002 * 48000.0);
+        double worstRatio = 0.0;
+
+        for (int at : switchAt)
+        {
+            if (at < (int) window * 3 || at + (int) window * 4 >= (int) out.size())
+                continue;
+
+            const double reference = jmax (worstStep ((size_t) at - 3 * window,
+                                                      (size_t) at - 2 * window),
+                                           worstStep ((size_t) at + 3 * window,
+                                                      (size_t) at + 4 * window));
+            worstRatio = jmax (worstRatio,
+                               worstStep ((size_t) at, (size_t) at + clickWindow)
+                                   / jmax (1.0e-9, reference));
+        }
+
+        std::printf ("      only %-20s changes: worst step %.2fx settled\n",
+                     group.name, worstRatio);
+
+        //  The all-at-once case is reported for context but bounded in
+        //  testPresets; here every SINGLE group must be smooth.
+        if (! group.ids.empty())
+            check (worstRatio <= 1.25,
+                   String ("changing ") + group.name + " alone does not step ("
+                       + String (worstRatio, 2) + "x)");
+    }
+}
+
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -5752,6 +6117,7 @@ int main()
     testMeterCalibration();
 
     testPresets();
+    testPresetChangeStepsNothing();
     testCpuBudget();
 
     testEditorSizesAndState();

@@ -27,11 +27,21 @@ namespace fourcolor
         void processPost (juce::AudioBuffer<float>& buffer) noexcept;
 
     private:
-        void apply (juce::AudioBuffer<float>& buffer, dsp::OnePole* filters, float amount) noexcept;
+        void apply (juce::AudioBuffer<float>& buffer, dsp::OnePole* filters,
+                    juce::SmoothedValue<float>& amount) noexcept;
 
         double rate = 48000.0;
         int channels = 2;
-        float amountPre = 0.0f, amountPost = 0.0f;
+
+        //  Smoothed per sample, not per block.
+        //
+        //  This stage is y = x + amount * highpass(x). The highpass output is
+        //  not zero, so a block-rate step in `amount` multiplies it by a
+        //  different number from one sample to the next and puts a
+        //  discontinuity straight into the signal. Loading a preset moves Tone
+        //  in one jump, and that measured as a 3.4x step against the material's
+        //  own slew - the only parameter of the fifty-one that did.
+        juce::SmoothedValue<float> amountPre { 0.0f }, amountPost { 0.0f };
         float currentCentre = 0.0f;
 
         dsp::OnePole preHp[2], postHp[2];

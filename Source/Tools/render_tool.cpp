@@ -189,12 +189,16 @@ namespace
     //  so the pack carries no sample licences with it. They are not a substitute
     //  for running your own material through the plug-in in a DAW - they are a
     //  fair, repeatable A/B that isolates one variable at a time.
-    enum class Source { bass, melody, drums, pad, vocal, fullLoop };
+    enum class Source { sub, eightOhEight, bass, kick, melody, lead, drums, pad, vocal, fullLoop };
 
     const char* sourceName (Source s)
     {
         switch (s)
         {
+            case Source::sub:          return "sub";
+            case Source::eightOhEight: return "808";
+            case Source::kick:         return "kick";
+            case Source::lead:         return "lead";
             case Source::bass:     return "bass";
             case Source::melody:   return "melody";
             case Source::drums:    return "drums";
@@ -220,6 +224,46 @@ namespace
 
         switch (src)
         {
+            case Source::sub:
+                //  A held 35 Hz tone with its second partial. This is the file
+                //  that answers "does the low end stay put and stay mono".
+                return 0.55 * std::sin (MathConstants<double>::twoPi * 35.0 * t)
+                     + 0.10 * std::sin (MathConstants<double>::twoPi * 70.0 * t);
+
+            case Source::eightOhEight:
+            {
+                //  One 808 every bar: pitch envelope from 106 Hz down to 46,
+                //  long decay. The single hardest case for BODY, because it is
+                //  already deep in the saturator before BODY asks for more.
+                const double phase = MathConstants<double>::twoPi
+                                         * (46.0 * bar
+                                            + (60.0 / 14.0) * (1.0 - std::exp (-bar * 14.0)));
+                return 0.70 * std::exp (-bar * 1.1)
+                            * (std::sin (phase) + 0.25 * std::sin (2.0 * phase));
+            }
+
+            case Source::kick:
+            {
+                //  Four on the floor, nothing else, so the transient is the
+                //  only thing to listen to.
+                const double kickF = 110.0 * std::exp (-beat * 22.0) + 48.0;
+                return 0.70 * std::exp (-beat * 13.0)
+                            * std::sin (MathConstants<double>::twoPi * kickF * beat);
+            }
+
+            case Source::lead:
+            {
+                //  A held, slightly detuned two-oscillator lead with movement:
+                //  sustained material with real upper harmonics.
+                const double vib = 1.0 + 0.006 * std::sin (MathConstants<double>::twoPi * 4.5 * t);
+                const double f = 330.0 * vib * (channel == 0 ? 1.0 : 1.003);
+                double v = 0.0;
+                for (int h = 1; h <= 10; ++h)
+                    v += (0.22 / h) * std::sin (MathConstants<double>::twoPi * f * h * t
+                                                + (double) h * 0.4);
+                return v * (0.6 + 0.4 * std::sin (MathConstants<double>::twoPi * 0.5 * t));
+            }
+
             case Source::bass:
             {
                 //  A rolling bass line: root, fifth, octave, minor seventh.
@@ -326,6 +370,9 @@ namespace
         float behavior = 0.0f;
         float space = 0.0f;
         bool bypassEngine = false;      // the dry reference
+        bool autoLevel = false;
+        int  poweredBands = 0xF;        // bit per band; 0 = that band passes clean
+        bool foldToMono = false;
     };
 
     //  Renders one source through one setup and returns interleaved stereo.
@@ -345,13 +392,16 @@ namespace
                 p->setValueNotifyingHost (p->convertTo0to1 (value));
         };
 
-        set (param::autoLevel, 0.0f);
+        set (param::autoLevel, setup.autoLevel ? 1.0f : 0.0f);
         for (int b = 0; b < numBands; ++b)
         {
+            const bool powered = (setup.poweredBands & (1 << b)) != 0;
             set (param::band (b, param::color), (float) (int) setup.color);
             set (param::band (b, param::drive), setup.bypassEngine ? 0.0f : setup.drive);
             set (param::band (b, param::behavior), setup.behavior);
             set (param::band (b, param::space), setup.bypassEngine ? 0.0f : setup.space);
+            //  Power off is the band's bypass: the range still passes, clean.
+            set (param::band (b, param::bypass), powered ? 0.0f : 1.0f);
         }
 
         AudioBuffer<float> out (2, (int) total);
@@ -377,8 +427,24 @@ namespace
                 continue;
 
             const auto count = (int) jmin ((int64) block, total - written);
-            for (int c = 0; c < 2; ++c)
-                out.copyFrom (c, (int) written, io, c, 0, count);
+
+            if (setup.foldToMono)
+            {
+                //  Sum to mono and put the same signal in both channels, which
+                //  is what a mono club system does to the mix.
+                for (int i = 0; i < count; ++i)
+                {
+                    const float m = 0.5f * (io.getSample (0, i) + io.getSample (1, i));
+                    out.setSample (0, (int) written + i, m);
+                    out.setSample (1, (int) written + i, m);
+                }
+            }
+            else
+            {
+                for (int c = 0; c < 2; ++c)
+                    out.copyFrom (c, (int) written, io, c, 0, count);
+            }
+
             written += count;
         }
 
@@ -440,16 +506,30 @@ namespace
         constexpr double targetRms = 0.10;          // about -20 dBFS RMS
 
         root.createDirectory();
-        const Source sources[] = { Source::bass, Source::melody, Source::drums,
-                                   Source::pad, Source::vocal, Source::fullLoop };
+        const Source sources[] = { Source::sub, Source::eightOhEight, Source::bass,
+                                   Source::kick, Source::drums, Source::melody,
+                                   Source::lead, Source::pad, Source::vocal,
+                                   Source::fullLoop };
         const char* colorNames[] = { "warm", "iron", "bite", "fuzz" };
         int written = 0;
 
+        //  Loudness-matched. Everything that compares CHARACTER goes through
+        //  here, because a louder file wins a blind A/B whatever it sounds like.
         auto emit = [&] (const String& folder, const String& name,
                          Source src, const AuditionSetup& setup)
         {
             auto buffer = renderAudition (src, setup, sr, seconds);
             normaliseToRms (buffer, targetRms);
+            if (writeWav (root.getChildFile (folder).getChildFile (name + ".wav"), buffer, sr))
+                ++written;
+        };
+
+        //  NOT loudness-matched. Auto Level's whole job is to set the level, so
+        //  normalising these two files would erase the only thing being tested.
+        auto emitAtTrueLevel = [&] (const String& folder, const String& name,
+                                    Source src, const AuditionSetup& setup)
+        {
+            auto buffer = renderAudition (src, setup, sr, seconds);
             if (writeWav (root.getChildFile (folder).getChildFile (name + ".wav"), buffer, sr))
                 ++written;
         };
@@ -508,6 +588,54 @@ namespace
                     s.space = space;
                     emit ("04-space", String (sourceName (src)) + "-" + colorNames[c]
                               + "-space" + String ((int) space), src, s);
+                }
+
+        //  05 - Power masks: four, three, two and one coloured band, the rest
+        //  passing clean. This is where you hear that Power is not Mute.
+        {
+            struct Mask { int bits; const char* name; };
+            const Mask masks[] = { { 0xF, "4-active" }, { 0xE, "3-active-low-clean" },
+                                   { 0xC, "2-active-top" }, { 0x8, "1-active-high" },
+                                   { 0x1, "1-active-low" }, { 0x0, "all-clean" } };
+
+            for (auto src : { Source::fullLoop, Source::drums, Source::bass })
+                for (auto& m : masks)
+                {
+                    AuditionSetup s;
+                    s.color = ColorType::iron;
+                    s.drive = 60.0f;
+                    s.poweredBands = m.bits;
+                    emit ("05-power", String (sourceName (src)) + "-" + m.name, src, s);
+                }
+        }
+
+        //  06 - Auto Level off against on, at TRUE level. Compare these two by
+        //  switching between them without touching the fader.
+        for (auto src : { Source::melody, Source::vocal, Source::fullLoop, Source::bass })
+            for (int on = 0; on < 2; ++on)
+            {
+                AuditionSetup s;
+                s.color = ColorType::bite;
+                s.drive = 65.0f;
+                s.autoLevel = on != 0;
+                emitAtTrueLevel ("06-autolevel", String (sourceName (src))
+                                     + (on != 0 ? "-al-on" : "-al-off"), src, s);
+            }
+
+        //  07 - mono fold on the low end. The sub and the 808 must not lose
+        //  weight when the room sums to mono, at any Space setting.
+        for (auto src : { Source::sub, Source::eightOhEight, Source::bass })
+            for (float space : { 0.0f, 60.0f })
+                for (int mono = 0; mono < 2; ++mono)
+                {
+                    AuditionSetup s;
+                    s.color = ColorType::warm;
+                    s.drive = 60.0f;
+                    s.space = space;
+                    s.foldToMono = mono != 0;
+                    emit ("07-mono", String (sourceName (src)) + "-space"
+                              + String ((int) space) + (mono != 0 ? "-mono" : "-stereo"),
+                          src, s);
                 }
 
         std::printf ("  wrote %d files under %s\n", written, root.getFullPathName().toRawUTF8());
