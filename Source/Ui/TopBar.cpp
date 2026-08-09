@@ -333,13 +333,13 @@ namespace fourcolor::ui
         g.drawText (productInfo::maker, markArea.withWidth (wordmarkWidth),
                     juce::Justification::centredLeft);
 
-        //  The version, right-aligned under the wordmark. A release candidate
-        //  has to say so on its face: the owner will have more than one build
-        //  of this on disk before it ships, and "which one am I hearing" must
-        //  not be a guess.
+        //  The version, right-aligned across the whole brand block so it sits
+        //  under the band dots and clear of the maker's mark. A release
+        //  candidate has to say so on its face: the owner will have more than
+        //  one build of this on disk before it ships, and "which one am I
+        //  hearing" must not be a guess.
         g.setColour (tokens::textDisabled);
-        g.drawText (productInfo::version, markArea.withWidth (wordmarkWidth),
-                    juce::Justification::centredRight);
+        g.drawText (productInfo::version, markArea, juce::Justification::centredRight);
 
         //  Four band dots after the wordmark.
         const float dotSize = 7.0f;
