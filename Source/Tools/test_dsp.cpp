@@ -2599,6 +2599,21 @@ static void testAutoLevelIsPerceptual()
                               ColorType::iron, 45.0f },
     };
 
+    //  SETTLING, not tuning. The correction glides with a 1.5 s time constant.
+    //  The first version of this test ran four seconds and discarded two, which
+    //  is 1.33 constants: it sampled a gain that was still moving and called
+    //  the remainder of the glide an error in the matcher. Eight seconds is
+    //  more than five constants, so what is measured afterwards is the
+    //  converged state. The thresholds below are unchanged.
+    constexpr int preRollBlocks  = 750;   //  8 s at 48 kHz / 512
+    constexpr int measureBlocks  = 375;   //  4 s
+
+    struct Rendered
+    {
+        double inLkfs, outLkfs;
+        float gainAtMeasureStart, gainAtEnd;
+    };
+
     std::vector<double> errors;
 
     for (const auto& c : cases)
@@ -2621,39 +2636,53 @@ static void testAutoLevelIsPerceptual()
             AudioBuffer<float> io (1, block);
             std::vector<float> in, out;
             int s = 0;
+            float gainAtStart = 1.0f;
 
-            //  Four seconds, of which the first two are discarded: the
-            //  correction glides over 1.5 s by design.
-            for (int blk = 0; blk < 375; ++blk)
+            for (int blk = 0; blk < preRollBlocks + measureBlocks; ++blk)
             {
                 auto* d = io.getWritePointer (0);
                 for (int i = 0; i < block; ++i, ++s)
                     d[i] = c.source (s);
 
-                if (blk >= 188)
+                if (blk == preRollBlocks)
+                    gainAtStart = engine.getAutoLevel().getCurrentGain();
+
+                if (blk >= preRollBlocks)
                     for (int i = 0; i < block; ++i)
                         in.push_back (d[i]);
 
                 engine.setParameters (p);
                 engine.process (io);
 
-                if (blk >= 188)
+                if (blk >= preRollBlocks)
                     for (int i = 0; i < block; ++i)
                         out.push_back (io.getSample (0, i));
             }
 
-            return std::pair<double, double> { loudnessLkfs (in, sr), loudnessLkfs (out, sr) };
+            return Rendered { loudnessLkfs (in, sr), loudnessLkfs (out, sr),
+                              gainAtStart, engine.getAutoLevel().getCurrentGain() };
         };
 
         const auto off = render (false);
         const auto on  = render (true);
 
-        const double errorOff = std::abs (off.second - off.first);
-        const double errorOn  = std::abs (on.second - on.first);
+        const double errorOff = std::abs (off.outLkfs - off.inLkfs);
+        const double errorOn  = std::abs (on.outLkfs - on.inLkfs);
         errors.push_back (errorOn);
+
+        //  The gain the matcher would have had to reach to land exactly, so a
+        //  residual error can be read as "did not converge" or "converged on
+        //  the wrong number" without guessing.
+        const double idealGainDb = off.inLkfs - off.outLkfs;
+        const double startDb = Decibels::gainToDecibels (on.gainAtMeasureStart);
+        const double endDb   = Decibels::gainToDecibels (on.gainAtEnd);
 
         std::printf ("      %-10s loudness error: %.2f LU off -> %.2f LU on\n",
                      c.name, errorOff, errorOn);
+        std::printf ("                 in %.2f LKFS, uncorrected out %.2f, corrected out %.2f;"
+                     " ideal %+.2f dB, gain %+.2f -> %+.2f dB (moved %.3f dB while measured)\n",
+                     off.inLkfs, off.outLkfs, on.outLkfs,
+                     idealGainDb, startDb, endDb, std::abs (endDb - startDb));
     }
 
     std::sort (errors.begin(), errors.end());

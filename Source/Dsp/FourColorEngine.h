@@ -78,6 +78,10 @@ namespace fourcolor
         Crossover& getCrossover() noexcept { return crossover; }
         BandProcessor& getBand (int i) noexcept { return bands[i]; }
 
+        //  Read-only, for the test suite's convergence diagnostics. Nothing in
+        //  the plug-in reads the correction back.
+        const AutoLevel& getAutoLevel() const noexcept { return autoLevel; }
+
     private:
         void applySafety (juce::AudioBuffer<float>& buffer) noexcept;
         void updateLatency() noexcept;
