@@ -47,12 +47,16 @@ namespace fourcolor
         FourColorEngine& getEngine() noexcept { return engine; }
 
         //  --- UI services ---------------------------------------------------------
-        //  Block-peak meters (atomics written on the audio thread). Channel
-        //  0 = L, 1 = R; the mono sum forms are kept for the older callers.
         //  Everything the meters need, published lock-free from the audio
         //  thread: block peak and block mean-square per channel, plus a clip
         //  latch. Ballistics, hold and decay all live in the GUI - the audio
-        //  thread only ever writes raw numbers.
+        //  thread only ever writes raw numbers. Channel 0 = L, 1 = R.
+        //
+        //  There is exactly ONE of these per measurement point. A second set of
+        //  plain peak atomics used to live alongside them: the output pair was
+        //  written by a duplicate loop nobody read, and the input pair was
+        //  never written at all, so every legacy caller asking for the input
+        //  peak got a permanent zero.
         struct MeterBlock
         {
             std::atomic<float> peak[2] { { 0.0f }, { 0.0f } };
@@ -89,12 +93,29 @@ namespace fourcolor
 
         MeterBlock inputMeter, outputMeter;
 
-        float readAndResetInputPeak() noexcept  { return juce::jmax (inputPeak[0].exchange (0.0f),
-                                                                     inputPeak[1].exchange (0.0f)); }
-        float readAndResetOutputPeak() noexcept { return juce::jmax (outputPeak[0].exchange (0.0f),
-                                                                     outputPeak[1].exchange (0.0f)); }
-        float readAndResetInputPeak (int channel) noexcept  { return inputPeak[channel & 1].exchange (0.0f); }
-        float readAndResetOutputPeak (int channel) noexcept { return outputPeak[channel & 1].exchange (0.0f); }
+        //  Thin readers over the blocks above, so there is no second copy of
+        //  the truth to fall out of date. Each is a destructive read: whoever
+        //  calls it takes the peak and leaves the accumulator at zero, which
+        //  is why there must be a single consumer per meter.
+        float readAndResetInputPeak (int channel) noexcept
+        {
+            return inputMeter.peak[channel & 1].exchange (0.0f, std::memory_order_relaxed);
+        }
+
+        float readAndResetOutputPeak (int channel) noexcept
+        {
+            return outputMeter.peak[channel & 1].exchange (0.0f, std::memory_order_relaxed);
+        }
+
+        float readAndResetInputPeak() noexcept
+        {
+            return juce::jmax (readAndResetInputPeak (0), readAndResetInputPeak (1));
+        }
+
+        float readAndResetOutputPeak() noexcept
+        {
+            return juce::jmax (readAndResetOutputPeak (0), readAndResetOutputPeak (1));
+        }
 
         //  A/B compare (message thread only): two full-state slots.
         void toggleAB();
@@ -158,8 +179,6 @@ namespace fourcolor
         void parameterChanged (const juce::String&, float) override { presetDirty.store (true); }
         void pushSpectrumSamples (const juce::AudioBuffer<float>& buffer) noexcept;
 
-        std::atomic<float> inputPeak[2] { { 0.0f }, { 0.0f } };
-        std::atomic<float> outputPeak[2] { { 0.0f }, { 0.0f } };
         std::atomic<bool> presetDirty { false };
 
         //  Frames of [mid, side]; sized once, never reallocated.

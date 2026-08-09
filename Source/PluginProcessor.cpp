@@ -236,14 +236,6 @@ namespace fourcolor
         //  exactly what leaves the plug-in.
         outputMeter.submit (buffer, buffer.getNumSamples(), meterChannels);
 
-        for (int m = 0; m < 2; ++m)
-        {
-            const int src = juce::jmin (m, meterChannels - 1);
-            const float peak = buffer.getMagnitude (src, 0, buffer.getNumSamples());
-            if (peak > outputPeak[m].load (std::memory_order_relaxed))
-                outputPeak[m].store (peak, std::memory_order_relaxed);
-        }
-
         //  Latency is a constant of the design and was reported in
         //  prepareToPlay. Telling a host about a new latency while the
         //  transport is running is exactly what Phase 12 set out to stop.

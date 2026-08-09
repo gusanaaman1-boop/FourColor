@@ -4926,6 +4926,225 @@ static void testColorContext()
     }
 }
 
+
+// ================================================================================
+//  Phase 4 (RC): the meters are calibrated, and there is only one of them
+//
+//  These meters are what the owner compares against Cubase's own, so "roughly
+//  right" is not good enough: an error here is indistinguishable from a gain
+//  bug in the plug-in. The numbers below are read exactly as the GUI reads
+//  them - straight off MeterBlock - so what is asserted is what is displayed.
+// ================================================================================
+static void testMeterCalibration()
+{
+    section ("Phase 4: meter calibration");
+
+    const double sr = 48000.0;
+    const int block = 512;
+
+    //  A sine, so peak and RMS have known values (RMS = peak / sqrt(2)) and any
+    //  discrepancy is the meter's, not the signal's.
+    struct Reading { double peakDb, rmsDb; };
+
+    auto measure = [&] (float amplitude, bool stereoUnequal, bool mono,
+                        float inputTrimDb, float outputTrimDb)
+    {
+        FourColorProcessor proc;
+        const int chans = mono ? 1 : 2;
+        proc.setPlayConfigDetails (chans, chans, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        //  Drive 0 everywhere: the meters are being calibrated, not the colour.
+        auto set = [&] (const String& id, float plain)
+        {
+            if (auto* p = proc.apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (plain));
+        };
+        for (int b = 0; b < numBands; ++b)
+            set (param::band (b, param::drive), 0.0f);
+        set (param::autoLevel, 0.0f);
+        set (param::input, inputTrimDb);
+        set (param::output, outputTrimDb);
+
+        AudioBuffer<float> buffer (chans, block);
+        MidiBuffer midi;
+
+        double inPeak = 0.0, outPeak = 0.0, inSq = 0.0, outSq = 0.0;
+        int counted = 0, s = 0;
+
+        for (int blk = 0; blk < 90; ++blk)
+        {
+            for (int i = 0; i < block; ++i, ++s)
+            {
+                const auto v = amplitude
+                                 * (float) std::sin (MathConstants<double>::twoPi * 1000.0 * s / sr);
+                buffer.setSample (0, i, v);
+                if (chans > 1)
+                    buffer.setSample (1, i, stereoUnequal ? 0.5f * v : v);
+            }
+
+            proc.processBlock (buffer, midi);
+
+            //  Let the trims' smoothers settle before believing anything.
+            if (blk < 60)
+            {
+                proc.inputMeter.peak[0].exchange (0.0f);
+                proc.outputMeter.peak[0].exchange (0.0f);
+                continue;
+            }
+
+            inPeak  = jmax (inPeak,  (double) proc.inputMeter.peak[0].exchange (0.0f));
+            outPeak = jmax (outPeak, (double) proc.outputMeter.peak[0].exchange (0.0f));
+            inSq  += proc.inputMeter.meanSquare[0].load();
+            outSq += proc.outputMeter.meanSquare[0].load();
+            ++counted;
+        }
+
+        return std::pair<Reading, Reading> {
+            { Decibels::gainToDecibels (inPeak),
+              Decibels::gainToDecibels (std::sqrt (inSq / jmax (1, counted))) },
+            { Decibels::gainToDecibels (outPeak),
+              Decibels::gainToDecibels (std::sqrt (outSq / jmax (1, counted))) } };
+    };
+
+    //  --- level accuracy across the working range ---------------------------
+    const float levels[] = { -36.0f, -18.0f, -12.0f, -6.0f, -1.0f, 0.0f };
+    double worstPeakError = 0.0, worstRmsError = 0.0;
+
+    for (float db : levels)
+    {
+        const auto amp = Decibels::decibelsToGain (db);
+        for (int mode = 0; mode < 3; ++mode)     // mono, stereo equal, stereo unequal
+        {
+            const auto r = measure (amp, mode == 2, mode == 0, 0.0f, 0.0f);
+
+            const double expectedRms = db - 3.0103;   // a sine's RMS
+            worstPeakError = jmax (worstPeakError, std::abs (r.first.peakDb - db));
+            worstRmsError  = jmax (worstRmsError, std::abs (r.first.rmsDb - expectedRms));
+            worstPeakError = jmax (worstPeakError, std::abs (r.second.peakDb - db));
+            worstRmsError  = jmax (worstRmsError, std::abs (r.second.rmsDb - expectedRms));
+        }
+    }
+
+    std::printf ("      worst error over -36..0 dBFS, mono and stereo:"
+                 " peak %.4f dB, RMS %.4f dB\n", worstPeakError, worstRmsError);
+
+    check (worstPeakError < 0.1,
+           "meter peak is accurate to 0.1 dB (" + String (worstPeakError, 4) + ")");
+    check (worstRmsError < 0.2,
+           "meter RMS is accurate to 0.2 dB (" + String (worstRmsError, 4) + ")");
+
+    //  --- the trims move their own meter, and only their own ----------------
+    const auto flat    = measure (0.25f, false, false, 0.0f, 0.0f);
+    const auto trimmed = measure (0.25f, false, false, 6.0f, -6.0f);
+
+    const double inputMoved  = trimmed.first.peakDb  - flat.first.peakDb;
+    const double outputMoved = trimmed.second.peakDb - flat.second.peakDb;
+
+    std::printf ("      Input Trim +6 dB moves the input meter %+.3f dB;"
+                 " Output Trim -6 dB moves the output meter %+.3f dB\n",
+                 inputMoved, outputMoved);
+
+    //  The input meter reads AFTER the input trim, so +6 in is +6 on the meter.
+    check (std::abs (inputMoved - 6.0) < 0.1,
+           "Input Trim moves the Input meter (" + String (inputMoved, 3) + " dB)");
+    //  The output meter reads after BOTH, so it carries +6 - 6 = 0.
+    check (std::abs (outputMoved) < 0.1,
+           "Output Trim takes back what Input Trim added ("
+               + String (outputMoved, 3) + " dB)");
+
+    //  --- clip latch --------------------------------------------------------
+    //  Drive 0 and Auto Level off deliberately. At any real Drive the saturator
+    //  compresses a +3 dBFS input to BELOW full scale, so the meter would never
+    //  see a clip - correct behaviour, but then the test would be measuring the
+    //  saturator instead of the indicator.
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        auto set = [&] (const String& id, float plain)
+        {
+            if (auto* p = proc.apvts.getParameter (id))
+                p->setValueNotifyingHost (p->convertTo0to1 (plain));
+        };
+        for (int b = 0; b < numBands; ++b)
+            set (param::band (b, param::drive), 0.0f);
+        set (param::autoLevel, 0.0f);
+
+        AudioBuffer<float> buffer (2, block);
+        MidiBuffer midi;
+
+        auto runAt = [&] (float amp)
+        {
+            for (int blk = 0; blk < 20; ++blk)
+            {
+                for (int i = 0; i < block; ++i)
+                {
+                    const auto v = amp * (float) std::sin (
+                        MathConstants<double>::twoPi * 1000.0 * (blk * block + i) / sr);
+                    buffer.setSample (0, i, v);
+                    buffer.setSample (1, i, v);
+                }
+                proc.processBlock (buffer, midi);
+            }
+        };
+
+        runAt (0.5f);
+        check (! proc.outputMeter.clipped.load(), "clip does not latch below 0 dBFS");
+
+        runAt (1.4f);                      // +3 dBFS in
+        check (proc.outputMeter.clipped.load(), "clip latches at and above 0 dBFS");
+
+        //  Flush first, THEN reset. The plug-in reports 65 samples of latency,
+        //  so the first block after the level drops still carries the tail of
+        //  the loud material and re-latches - correctly. Resetting before that
+        //  material has left the pipeline tests the pipeline, not the button.
+        runAt (0.5f);
+        proc.outputMeter.clipped.store (false);
+        runAt (0.5f);
+        check (! proc.outputMeter.clipped.load(), "clip reset clears the latch");
+    }
+
+    //  --- one source of truth ------------------------------------------------
+    //  The legacy accessors must read the same block the GUI reads, not a
+    //  second copy. The input pair in particular used to be written by nobody
+    //  and returned a permanent zero.
+    {
+        FourColorProcessor proc;
+        proc.setPlayConfigDetails (2, 2, sr, block);
+        proc.prepareToPlay (sr, block);
+
+        AudioBuffer<float> buffer (2, block);
+        MidiBuffer midi;
+        for (int blk = 0; blk < 20; ++blk)
+        {
+            for (int i = 0; i < block; ++i)
+            {
+                const auto v = 0.5f * (float) std::sin (
+                    MathConstants<double>::twoPi * 1000.0 * (blk * block + i) / sr);
+                buffer.setSample (0, i, v);
+                buffer.setSample (1, i, v);
+            }
+            proc.processBlock (buffer, midi);
+        }
+
+        const float legacyIn  = proc.readAndResetInputPeak();
+        const float legacyOut = proc.readAndResetOutputPeak();
+
+        check (legacyIn > 0.4f && legacyIn < 0.6f,
+               "the legacy input peak reads the real input meter ("
+                   + String (legacyIn, 4) + ")");
+        check (legacyOut > 0.4f && legacyOut < 0.6f,
+               "the legacy output peak reads the real output meter ("
+                   + String (legacyOut, 4) + ")");
+
+        //  ...and it is destructive, so a second read is empty.
+        check (proc.readAndResetInputPeak() == 0.0f,
+               "reading the input peak resets it");
+    }
+}
+
 int main()
 {
     ScopedJuceInitialiser_GUI juceInit;
@@ -4985,6 +5204,8 @@ int main()
     testAutoLevelIsPerceptual();
     testAutoLevelHoldsInSilence();
     testMixNoCombFiltering();
+
+    testMeterCalibration();
 
     testPresets();
     testCpuBudget();
