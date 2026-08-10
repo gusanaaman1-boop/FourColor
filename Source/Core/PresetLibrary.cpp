@@ -348,6 +348,248 @@ namespace fourcolor
                 band (v, 3, ColorType::bite, 50.0f, 90.0f, 10.0f);
             });
 
+
+            // ==================================================================
+            //  SIGNATURE SET
+            //
+            //  These differ from the presets above in one structural way: they
+            //  MOVE THE CROSSOVERS. The four bands are the instrument, and
+            //  leaving them at 120 / 700 / 4500 for every job wastes them -
+            //  a preset that wants the drum "thwack" region and a preset that
+            //  wants a lead's presence are asking for different bands, not
+            //  different drives.
+            //
+            //  The frequency targets are the ones mixing practice actually
+            //  uses: 200-400 Hz for punch, 400-600 Hz for the boxiness to keep
+            //  out of it, 2-5 kHz for presence, 5 kHz for a snare's crack, and
+            //  for sub work a split low enough that the fundamental and its
+            //  second harmonic land in different bands.
+            //
+            //  Voiced BOLD on purpose. Every one of these does something you
+            //  can hear the moment it loads; Band Mix and Master Mix are the
+            //  way back down. A preset nobody can hear teaches nothing about
+            //  the plug-in.
+            // ==================================================================
+
+            // --- SUB ------------------------------------------------------------
+            add ("SUB - Translate Small Speakers", "Sub", [] (V& v)
+            {
+                //  A phone has no 40 Hz driver. What makes a sub audible there
+                //  is its HARMONICS, so the split goes low enough that the
+                //  fundamental sits alone in LOW while the second and third
+                //  harmonics land in LOW MID, where they are driven hard and
+                //  the ear reconstructs the missing fundamental from them.
+                //  LOW itself is barely touched - the weight on a real system
+                //  has to survive intact.
+                v.emplace_back (p::xover1, 75.0f);
+                v.emplace_back (p::xover2, 320.0f);
+                band (v, 0, ColorType::warm, 18.0f, -20.0f);
+                band (v, 1, ColorType::bite, 72.0f, -15.0f, 10.0f);
+                band (v, 2, ColorType::warm, 25.0f);
+                bandBypass (v, 3);
+            });
+
+            add ("SUB - Saturated Weight", "Sub", [] (V& v)
+            {
+                //  The opposite intent: colour the fundamental itself. IRON's
+                //  feedback loop returns only the bottom of its own band, which
+                //  is what reads as weight rather than as mud.
+                v.emplace_back (p::xover1, 90.0f);
+                band (v, 0, ColorType::iron, 62.0f, -45.0f, -12.0f);
+                band (v, 1, ColorType::warm, 30.0f, -20.0f);
+                band (v, 2, ColorType::warm, 20.0f);
+                bandBypass (v, 3);
+            });
+
+            add ("SUB - Guard", "Sub", [] (V& v)
+            {
+                //  Everything above the sub gets colour; the sub is powered off
+                //  and passes clean. For a mastering chain, or any time the low
+                //  end is already exactly right and must not be touched.
+                v.emplace_back (p::xover1, 85.0f);
+                bandBypass (v, 0);
+                band (v, 1, ColorType::warm, 45.0f, -15.0f);
+                band (v, 2, ColorType::bite, 40.0f);
+                band (v, 3, ColorType::warm, 32.0f, 0.0f, -8.0f);
+            });
+
+            // --- BASS -----------------------------------------------------------
+            add ("BASS - Harmonic Stack", "Bass", [] (V& v)
+            {
+                //  Three different engines across three bands, so the harmonic
+                //  series is built from three different curves instead of one
+                //  repeated. The split at 250 puts the fundamental region and
+                //  the growl region under separate control.
+                v.emplace_back (p::xover1, 110.0f);
+                v.emplace_back (p::xover2, 900.0f);
+                band (v, 0, ColorType::warm, 52.0f, -30.0f);
+                band (v, 1, ColorType::iron, 68.0f, -15.0f, 8.0f);
+                band (v, 2, ColorType::bite, 58.0f, 10.0f);
+                band (v, 3, ColorType::warm, 25.0f, 0.0f, -10.0f);
+            });
+
+            add ("BASS - Parallel Grit", "Bass", [] (V& v)
+            {
+                //  Hard drive folded under the dry bass at 45%. The dry leg is
+                //  phase-aligned, so this thickens without the comb filtering a
+                //  hand-built parallel bus gives you.
+                v.emplace_back (p::mix, 45.0f);
+                v.emplace_back (p::xover1, 120.0f);
+                v.emplace_back (p::xover2, 800.0f);
+                band (v, 0, ColorType::warm, 40.0f, -25.0f);
+                band (v, 1, ColorType::bite, 82.0f, 0.0f, 12.0f);
+                band (v, 2, ColorType::fuzz, 65.0f, 15.0f);
+                band (v, 3, ColorType::bite, 45.0f, 10.0f, -6.0f);
+            });
+
+            add ("BASS - Sustain Body", "Bass", [] (V& v)
+            {
+                //  Full BODY on the two lowest bands: the note's tail gets
+                //  density while the pluck at the front is left alone. This is
+                //  the preset that shows what the new BODY actually does.
+                v.emplace_back (p::xover1, 130.0f);
+                band (v, 0, ColorType::warm, 58.0f, -100.0f);
+                band (v, 1, ColorType::iron, 55.0f, -100.0f, 6.0f);
+                band (v, 2, ColorType::warm, 30.0f, -40.0f);
+                band (v, 3, ColorType::warm, 20.0f);
+            });
+
+            // --- DRUMS ----------------------------------------------------------
+            add ("DRUMS - Punch 200-450", "Drums", [] (V& v)
+            {
+                //  The crossovers ARE this preset. LOW MID is set to 130-450,
+                //  which is the thwack region, and it is driven hard with
+                //  ATTACK. HIGH MID starts at 450 and is left gentle, because
+                //  400-600 Hz is where boxiness lives and driving it undoes the
+                //  punch you just bought.
+                v.emplace_back (p::xover1, 130.0f);
+                v.emplace_back (p::xover2, 450.0f);
+                v.emplace_back (p::xover3, 4000.0f);
+                band (v, 0, ColorType::warm, 42.0f, -20.0f);
+                band (v, 1, ColorType::iron, 78.0f, 85.0f, 6.0f);
+                band (v, 2, ColorType::warm, 22.0f, 20.0f, -10.0f);
+                band (v, 3, ColorType::bite, 48.0f, 60.0f);
+            });
+
+            add ("DRUMS - Snare Crack", "Drums", [] (V& v)
+            {
+                //  HIGH starts at 3.8 kHz so the top band is exactly the crack
+                //  region, and BITE with full ATTACK sharpens it. The body of
+                //  the kit stays where it was.
+                v.emplace_back (p::xover2, 600.0f);
+                v.emplace_back (p::xover3, 3800.0f);
+                band (v, 0, ColorType::warm, 28.0f, -15.0f);
+                band (v, 1, ColorType::warm, 35.0f, 30.0f);
+                band (v, 2, ColorType::iron, 45.0f, 55.0f);
+                band (v, 3, ColorType::bite, 76.0f, 100.0f, 14.0f);
+            });
+
+            add ("DRUMS - Harmonic Kit", "Drums", [] (V& v)
+            {
+                //  Four engines, one per band, all moderate. The point is the
+                //  DIFFERENCE between them: weight from WARM, density from
+                //  IRON, presence from BITE, air texture from FUZZ.
+                v.emplace_back (p::xover1, 110.0f);
+                v.emplace_back (p::xover2, 500.0f);
+                v.emplace_back (p::xover3, 4200.0f);
+                band (v, 0, ColorType::warm, 50.0f, -30.0f);
+                band (v, 1, ColorType::iron, 55.0f, 25.0f);
+                band (v, 2, ColorType::bite, 52.0f, 40.0f);
+                band (v, 3, ColorType::fuzz, 38.0f, 50.0f, -8.0f, 20.0f);
+            });
+
+            add ("DRUMS - Parallel Slam", "Drums", [] (V& v)
+            {
+                //  Everything driven far past sensible, then folded in at 30%.
+                //  The dry transient survives; what you add underneath is pure
+                //  harmonic weight.
+                v.emplace_back (p::mix, 30.0f);
+                v.emplace_back (p::xover1, 120.0f);
+                v.emplace_back (p::xover2, 480.0f);
+                band (v, 0, ColorType::iron, 88.0f, -30.0f);
+                band (v, 1, ColorType::fuzz, 85.0f, 20.0f);
+                band (v, 2, ColorType::bite, 90.0f, 40.0f);
+                band (v, 3, ColorType::fuzz, 70.0f, 55.0f, -10.0f);
+            });
+
+            // --- LEAD -----------------------------------------------------------
+            add ("LEAD - Forward 2k-5k", "Lead", [] (V& v)
+            {
+                //  HIGH MID is set to 1.2k-5k, which is the presence region a
+                //  lead needs to cut. It gets BITE, whose pre-emphasis pushes
+                //  the top of its own band into the clipper - so this is
+                //  "distorted forward", not simply brighter.
+                v.emplace_back (p::xover2, 1200.0f);
+                v.emplace_back (p::xover3, 5000.0f);
+                band (v, 0, ColorType::warm, 25.0f, -20.0f);
+                band (v, 1, ColorType::warm, 38.0f);
+                band (v, 2, ColorType::bite, 74.0f, 25.0f, 12.0f);
+                band (v, 3, ColorType::warm, 35.0f, 0.0f, -12.0f);
+            });
+
+            add ("LEAD - Wide Harmonics", "Lead", [] (V& v)
+            {
+                //  Space diffuses ONLY the non-linear product, so the lead's
+                //  own note stays centred while the harmonics it generates
+                //  spread. The low band is left mono and clean underneath.
+                v.emplace_back (p::xover2, 1000.0f);
+                v.emplace_back (p::xover3, 5200.0f);
+                band (v, 0, ColorType::warm, 20.0f);
+                band (v, 1, ColorType::warm, 45.0f, -20.0f, 0.0f, 25.0f);
+                band (v, 2, ColorType::iron, 62.0f, 15.0f, 6.0f, 55.0f);
+                band (v, 3, ColorType::bite, 48.0f, 20.0f, 0.0f, 60.0f);
+            });
+
+            add ("LEAD - Sustain Density", "Lead", [] (V& v)
+            {
+                //  BODY on the mids: a held note thickens through its tail
+                //  instead of only at the attack. Pairs with a long release.
+                v.emplace_back (p::xover2, 1100.0f);
+                v.emplace_back (p::xover3, 5000.0f);
+                band (v, 0, ColorType::warm, 22.0f);
+                band (v, 1, ColorType::iron, 58.0f, -100.0f);
+                band (v, 2, ColorType::warm, 62.0f, -100.0f, 8.0f);
+                band (v, 3, ColorType::warm, 30.0f, -40.0f);
+            });
+
+            // --- PARALLEL -------------------------------------------------------
+            add ("PARALLEL - Warm Under", "Parallel", [] (V& v)
+            {
+                //  The safe one. Heavy WARM everywhere, blended at 35%: adds
+                //  weight and glue to anything without changing its character.
+                v.emplace_back (p::mix, 35.0f);
+                band (v, 0, ColorType::warm, 70.0f, -40.0f);
+                band (v, 1, ColorType::warm, 72.0f, -25.0f);
+                band (v, 2, ColorType::warm, 68.0f);
+                band (v, 3, ColorType::warm, 55.0f, 0.0f, -8.0f);
+            });
+
+            add ("PARALLEL - Iron Density", "Parallel", [] (V& v)
+            {
+                //  IRON in parallel is the one that makes a thin source feel
+                //  expensive: its core-loss loop returns the bottom of each
+                //  band, so the blend adds weight rather than fizz.
+                v.emplace_back (p::mix, 40.0f);
+                v.emplace_back (p::xover2, 600.0f);
+                band (v, 0, ColorType::iron, 75.0f, -35.0f);
+                band (v, 1, ColorType::iron, 80.0f, -20.0f);
+                band (v, 2, ColorType::iron, 72.0f, 15.0f);
+                band (v, 3, ColorType::warm, 45.0f, 0.0f, -10.0f);
+            });
+
+            add ("PARALLEL - Edge Blend", "Parallel", [] (V& v)
+            {
+                //  BITE and FUZZ hard, folded in at 25%. For sources that are
+                //  already dense and need aggression rather than weight.
+                v.emplace_back (p::mix, 25.0f);
+                v.emplace_back (p::xover2, 700.0f);
+                v.emplace_back (p::xover3, 4500.0f);
+                band (v, 0, ColorType::warm, 45.0f, -30.0f);
+                band (v, 1, ColorType::bite, 85.0f, 20.0f);
+                band (v, 2, ColorType::fuzz, 78.0f, 35.0f);
+                band (v, 3, ColorType::bite, 70.0f, 45.0f, 8.0f);
+            });
+
             return out;
         }();
 

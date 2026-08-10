@@ -643,12 +643,140 @@ namespace
     }
 }
 
+namespace
+{
+    //  --- preset pack --------------------------------------------------------
+    //  Renders each factory preset against the DRY source it was designed for,
+    //  loudness-matched, so the only difference you hear is what the preset
+    //  does. A preset audition that is not level-matched just tells you which
+    //  preset is loudest.
+    int writePresetPack (const File& root, const String& onlyCategory)
+    {
+        constexpr double sr = 48000.0;
+        constexpr double seconds = 4.0;
+        constexpr double targetRms = 0.10;
+
+        root.createDirectory();
+
+        FourColorProcessor probe;
+        const int numPresets = probe.getNumPrograms();
+        int written = 0;
+
+        //  Which programme material suits which kind of preset. A drum preset
+        //  auditioned on a pad says nothing.
+        auto sourcesFor = [] (const String& name) -> std::vector<Source>
+        {
+            if (name.startsWith ("SUB"))      return { Source::sub, Source::eightOhEight };
+            if (name.startsWith ("BASS"))     return { Source::bass, Source::eightOhEight };
+            if (name.startsWith ("DRUMS"))    return { Source::drums, Source::kick };
+            if (name.startsWith ("LEAD"))     return { Source::lead, Source::melody };
+            if (name.startsWith ("PARALLEL")) return { Source::fullLoop, Source::drums };
+            return { Source::fullLoop };
+        };
+
+        //  One render of a source through a whole preset, by program index.
+        auto renderPreset = [&] (int index, Source src)
+        {
+            const int block = 512;
+            const auto total = (int64) (seconds * sr);
+
+            FourColorProcessor proc;
+            proc.setPlayConfigDetails (2, 2, sr, block);
+            proc.prepareToPlay (sr, block);
+            proc.setCurrentProgram (index);
+
+            AudioBuffer<float> out (2, (int) total);
+            out.clear();
+
+            AudioBuffer<float> io (2, block);
+            MidiBuffer midi;
+            int64 written2 = 0;
+            const int64 preRoll = (int64) (0.5 * sr);
+
+            for (int64 n = -preRoll; written2 < total; n += block)
+            {
+                for (int i = 0; i < block; ++i)
+                    for (int c = 0; c < 2; ++c)
+                        io.setSample (c, i, (float) auditionSample (src, n + i, sr, c));
+
+                proc.processBlock (io, midi);
+
+                if (n < 0)
+                    continue;
+
+                const auto count = (int) jmin ((int64) block, total - written2);
+                for (int c = 0; c < 2; ++c)
+                    out.copyFrom (c, (int) written2, io, c, 0, count);
+                written2 += count;
+            }
+
+            return out;
+        };
+
+        //  The dry reference for each source, once.
+        std::vector<Source> allSources = { Source::sub, Source::eightOhEight, Source::bass,
+                                           Source::kick, Source::drums, Source::melody,
+                                           Source::lead, Source::fullLoop };
+        for (auto src : allSources)
+        {
+            AuditionSetup dry;
+            dry.bypassEngine = true;
+            auto buffer = renderAudition (src, dry, sr, seconds);
+            normaliseToRms (buffer, targetRms);
+            if (writeWav (root.getChildFile ("00-dry")
+                              .getChildFile (String (sourceName (src)) + ".wav"), buffer, sr))
+                ++written;
+        }
+
+        for (int i = 0; i < numPresets; ++i)
+        {
+            const auto name = probe.getProgramName (i);
+
+            //  The signature set is the one with an upper-case task prefix -
+            //  "DRUMS - Snare Crack". Everything before it is grouped by its
+            //  library category instead, or the folders come out as one per
+            //  preset, split on whatever the first word happened to be.
+            const auto dash = name.indexOfChar ('-');
+            const bool signature = dash > 0
+                                && name.substring (0, dash).trim().isNotEmpty()
+                                && name.substring (0, dash).trim()
+                                       == name.substring (0, dash).trim().toUpperCase();
+
+            if (onlyCategory.equalsIgnoreCase ("signature") && ! signature)
+                continue;
+            if (onlyCategory.isNotEmpty() && ! onlyCategory.equalsIgnoreCase ("signature")
+                && ! name.startsWithIgnoreCase (onlyCategory))
+                continue;
+
+            for (auto src : sourcesFor (name))
+            {
+                auto buffer = renderPreset (i, src);
+                normaliseToRms (buffer, targetRms);
+
+                const auto safe = name.replaceCharacters (" /", "__");
+                const auto folder = signature
+                                      ? name.substring (0, dash).trim()
+                                      : String ("z-existing-")
+                                            + String (PresetLibrary::category (i));
+
+                if (writeWav (root.getChildFile (folder)
+                                  .getChildFile (safe + "__" + sourceName (src) + ".wav"),
+                              buffer, sr))
+                    ++written;
+            }
+        }
+
+        std::printf ("  wrote %d files under %s\n", written, root.getFullPathName().toRawUTF8());
+        return written > 0 ? 0 : 1;
+    }
+}
+
 int main (int argc, char* argv[])
 {
     ScopedJuceInitialiser_GUI juceInit;
 
     bool csv = false, fingerprint = false;
-    String fixtureDir, auditionDir;
+    String fixtureDir, auditionDir, presetDir, onlyCategory;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -657,6 +785,8 @@ int main (int argc, char* argv[])
         else if (arg == "--fingerprint") fingerprint = true;
         else if (arg == "--write-state-fixtures" && i + 1 < argc) fixtureDir = argv[++i];
         else if (arg == "--audition" && i + 1 < argc) auditionDir = argv[++i];
+        else if (arg == "--preset-pack" && i + 1 < argc) presetDir = argv[++i];
+        else if (arg == "--only" && i + 1 < argc) onlyCategory = argv[++i];
     }
 
     if (fixtureDir.isNotEmpty())
@@ -665,11 +795,16 @@ int main (int argc, char* argv[])
     if (auditionDir.isNotEmpty())
         return writeAuditionPack (File::getCurrentWorkingDirectory().getChildFile (auditionDir));
 
+    if (presetDir.isNotEmpty())
+        return writePresetPack (File::getCurrentWorkingDirectory().getChildFile (presetDir),
+                                onlyCategory);
+
     if (! fingerprint)
     {
         std::printf ("usage: FourColorRender --fingerprint [--csv]\n"
                      "       FourColorRender --write-state-fixtures <dir>\n"
-                     "       FourColorRender --audition <dir>\n");
+                     "       FourColorRender --audition <dir>\n"
+                     "       FourColorRender --preset-pack <dir> [--only PREFIX]\n");
         return 2;
     }
 
