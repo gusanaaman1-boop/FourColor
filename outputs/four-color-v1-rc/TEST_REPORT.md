@@ -3,8 +3,7 @@
 ```
 STATUS:   RC READY FOR OWNER VALIDATION
 VERSION:  1.0.0-rc.1
-HEAD:     2801e656832c08962714e745e0fc427bf194abb9
-          (Phase 10; Phase 11 adds only these documents)
+HEAD:     41d4f3f7e8bd2a58bf5a1004b224283da9b35399
 ```
 
 ## Commits in this round
@@ -21,20 +20,23 @@ HEAD:     2801e656832c08962714e745e0fc427bf194abb9
 | 8 | `241d204` | Presets + owner listening pack |
 | 9 | `85039f1` | Host validation matrix |
 | 10 | `2801e65` | Package 1.0.0-rc.1 |
+| 11 | `218a5e2` | Delivery documents |
+| — | `0c466ad` | Fix three things that would have broken the Windows build |
+| — | `41d4f3f` | Make the editor CPU figure a measurement rather than a coin toss |
 
 ## Tests
 
 | | Before | After |
 | --- | --- | --- |
-| checks | 381 | **456** |
+| checks | 381 | **457** |
 | failures | **2** | **0** |
 
 Agreeing across three builds, same numbers in each:
 
 ```
-Release          456 checks, 0 failed
-Debug            456 checks, 0 failed
-ASan + UBSan     456 checks, 0 failed, 0 sanitizer findings
+Release          457 checks, 0 failed
+Debug            457 checks, 0 failed
+ASan + UBSan     457 checks, 0 failed, 0 sanitizer findings
 ```
 
 Matrix: 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz against block sizes
@@ -161,10 +163,19 @@ The single unexplained Windows allocation did not reproduce.
 4x oversampling      19.8x realtime
 8x oversampling      10.8x realtime
 analyzer repaint     11.1% of one core at 30 FPS
-editor during play   under 15% of one core above the harness baseline
-idle editor          no measurable cost; 0 repaints over 3 seconds
-frame rate           29.0 FPS measured against 30 nominal, p95 interval 37.2 ms
+editor during play   2.8% of one core above the harness baseline
+idle editor          -0.2%; 0 analyzer repaints and 0 background repaints over 3 s
+frame rate           29.0 FPS against 30 nominal
+frame evenness       p95 37.2 ms against a 34.1 ms median (1.09x)
 ```
+
+Every figure above is the best of several passes with the baseline re-measured
+between them. A single sample of a CPU difference on a machine that is also
+compiling something measures the machine: this same check read -1.8 %, 2.8 %,
+8.3 %, 19.7 % and 23.7 % across runs with no code change. The frame-evenness
+criterion is likewise relative to the run's own median rather than to an
+absolute 40 ms, because the test harness drives the message loop in 5 ms slices
+and pins the timer near 27 FPS whatever the plug-in does.
 
 Two real performance bugs were fixed here. `MeterColumn` repainted
 unconditionally 30 times a second forever, with ballistics decaying to
@@ -173,6 +184,25 @@ And the analyzer's ring still held the last bar of audio after the host stopped
 calling `processBlock`, so its own silence test could never fire — it animated
 stale content and ran two 4096-point FFTs per frame to do it. Idle went from
 **87 repaints per 3 s to 0.**
+
+## Windows portability
+
+Three things in this round's own code would have stopped the Windows build, and
+were only found because the package was checked rather than assumed:
+
+- `getrusage` and `<sys/resource.h>`, added in Phase 5, are POSIX only. MSVC has
+  neither, so the build would have failed at the include. Replaced with a
+  portable `processCpuSeconds()` — `GetProcessTimes` on Windows.
+- The Windows package was missing `Tests/fixtures` entirely, and
+  `build-windows.bat` treats a failing test as fatal, so the build would have
+  aborted after compiling successfully.
+- The p95 frame check was measuring the harness, and a flaky performance
+  assertion would likewise have aborted the owner's build.
+
+The shipped package was then extracted clean, configured, built and run end to
+end: 457 checks, 0 failed, exit code 0, VST3 produced. That proves the file set
+is complete and the code compiles — it does **not** prove MSVC accepts it under
+`/WX`, which remains the honest gap.
 
 ## Preset click
 

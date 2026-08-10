@@ -2,7 +2,7 @@
 
 ## 1.0.0-rc.1 — 2026-08-09
 
-First release candidate. **456 checks, 0 failed**, agreeing across Release,
+First release candidate. **457 checks, 0 failed**, agreeing across Release,
 Debug and ASan/UBSan.
 
 ### Fixed

@@ -7,9 +7,10 @@ empty, not assumed.
 
 ## Done
 
-- [x] 456 checks, 0 failed — Release
-- [x] 456 checks, 0 failed — Debug
-- [x] 456 checks, 0 failed — ASan + UBSan, 0 sanitizer findings
+- [x] 457 checks, 0 failed — Release
+- [x] 457 checks, 0 failed — Debug
+- [x] 457 checks, 0 failed — ASan + UBSan, 0 sanitizer findings
+- [x] The Windows package builds and passes from a clean extraction
 - [x] Sample-rate × block-size matrix: 6 rates × 9 block sizes × mono/stereo
 - [x] 0 audio-thread allocations across 100 randomised sessions
 - [x] 0 NaN / Inf
