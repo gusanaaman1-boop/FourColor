@@ -101,6 +101,10 @@ for %%C in (%CONFIGS%) do (
         exit /b 1
     )
 
+    REM Performance checks measure the machine as much as the plug-in, and this
+    REM script has no idea what else is running on it. They are reported and not
+    REM enforced here; they are enforced on a quiet machine before release.
+    set "FOURCOLOR_SKIP_PERF=1"
     echo == tests %%C
     "%BUILD_DIR%\FourColorTests_artefacts\%%C\FourColorTests.exe"
     if errorlevel 1 (
