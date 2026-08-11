@@ -56,8 +56,22 @@ namespace fourcolor
         layout.add (std::make_unique<Pb> (juce::ParameterID { p::autoLevel, 1 }, "Auto Level", true));
         layout.add (std::make_unique<P> (juce::ParameterID { p::mix, 1 }, "Mix",
                         percent(), 100.0f, attr (pctText)));
+        //  Symmetric, and deliberately the same range as Input.
+        //
+        //  It used to be -24..+12, which put 0 dB at two thirds of the travel:
+        //  the OUTPUT knob sat visibly rotated clockwise at its default while
+        //  the INPUT knob beside it pointed straight up. Measured off a
+        //  rendered frame, the pointer was at +45.0 degrees, exactly what
+        //  (0 - -24) / (12 - -24) predicts. The two are drawn as a matched
+        //  pair, so they must behave as one.
+        //
+        //  APVTS stores PLAIN values - verified by decoding a state fixture,
+        //  where input reads 0.0 and mix reads 100.0 - so 0 dB in a saved
+        //  project stays 0 dB and nothing gets louder. Host AUTOMATION is
+        //  normalised, though, so a lane written against the old range moves;
+        //  that is why this is a pre-release change and not a later one.
         layout.add (std::make_unique<P> (juce::ParameterID { p::output, 1 }, "Output",
-                        juce::NormalisableRange<float> (-24.0f, 12.0f), 0.0f, attr (dbText)));
+                        juce::NormalisableRange<float> (-24.0f, 24.0f), 0.0f, attr (dbText)));
         layout.add (std::make_unique<Pc> (juce::ParameterID { p::quality, 1 }, "Quality",
                         juce::StringArray { "Draft", "Normal", "High", "Ultra" }, (int) Quality::high));
         layout.add (std::make_unique<Pb> (juce::ParameterID { p::bypassed, 1 }, "Bypass", false));
