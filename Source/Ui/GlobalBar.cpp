@@ -88,15 +88,20 @@ namespace fourcolor::ui
                     juce::Justification::centred);
     }
 
+    void GlobalBar::setMeterWidth (int w)
+    {
+        if (meterWidth != w)
+        {
+            meterWidth = w;
+            resized();
+            repaint();
+        }
+    }
+
     void GlobalBar::resized()
     {
         auto area = getLocalBounds().reduced (14, 9);
         separatorX.clear();
-
-        //  Three groups only. The meters are no longer here - they flank the
-        //  analyzer, next to their own trims.
-        const int groups = 3;
-        const int gw = area.getWidth() / groups;
 
         auto place = [] (Knob& k, juce::Rectangle<int> cell)
         {
@@ -104,14 +109,48 @@ namespace fourcolor::ui
             k.setBounds (cell.withSizeKeepingCentre (w, cell.getHeight()));
         };
 
+        //  OUTPUT is the same parameter as the trim under the output meter, and
+        //  it used to sit at five sixths of the bar while the meter column sat
+        //  hard against the right edge - two controls for one thing, on two
+        //  different lines. It now centres on the meter column's own centre, so
+        //  the output meter, its trim and this knob form a single column.
+        if (meterWidth > 0)
+        {
+            const int outCentre = getWidth() - meterWidth / 2;
+
+            //  The cell has to FIT, not merely be centred: the meter column's
+            //  axis sits only half a meter width from the right edge, so a
+            //  112 px cell centred there hangs 26 px outside the bar and the
+            //  knob is clipped. Measured off the rendered pixels, the dial came
+            //  out 20 px left of the meter it was supposed to line up with -
+            //  the bounds agreed while the picture did not.
+            //
+            //  So the width is whatever fits symmetrically about that axis.
+            //  It lands close to the meter trim's own diameter, which is right:
+            //  meter, trim and OUTPUT then read as one narrow column.
+            const int room = juce::jmin (outCentre, getWidth() - outCentre);
+            const int outW = juce::jmin (112, room * 2);
+
+            auto outputCell = juce::Rectangle<int> (outCentre - outW / 2, area.getY(),
+                                                    outW, area.getHeight());
+            place (*output, outputCell);
+
+            area = area.withRight (outputCell.getX() - 14);
+        }
+        else
+        {
+            place (*output, area.removeFromRight (area.getWidth() / 3));
+        }
+
+        const int gw = area.getWidth() / 2;
+
         auto first = area.removeFromLeft (gw);
         autoLevelButton->setBounds (first.withSizeKeepingCentre (48, 48)
                                          .withY (first.getY() + 26));
 
         separatorX.push_back (area.getX());
-        place (*mix, area.removeFromLeft (gw));
+        place (*mix, area);
 
-        separatorX.push_back (area.getX());
-        place (*output, area);
+        separatorX.push_back (area.getRight() + 14);
     }
 }

@@ -29,6 +29,12 @@ namespace fourcolor::ui
         GlobalBar (FourColorProcessor& processor);
         ~GlobalBar() override;
 
+        //  The width of the meter columns flanking the analyzer. OUTPUT is
+        //  placed on the same vertical line as the output meter's own trim, so
+        //  the two controls for the same parameter read as one column instead
+        //  of floating at unrelated positions.
+        void setMeterWidth (int w);
+
         void paint (juce::Graphics&) override;
         void resized() override;
 
@@ -43,6 +49,7 @@ namespace fourcolor::ui
         std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoLevelAttachment;
 
         std::vector<int> separatorX;
+        int meterWidth = 0;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlobalBar)
     };

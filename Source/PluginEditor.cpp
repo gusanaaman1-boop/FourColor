@@ -138,5 +138,9 @@ namespace fourcolor
                                    .withTrimmedRight (meterW + 6));
         bandStrip.setBounds (rowBetween (panelTop, panelBottom));
         globalBar.setBounds (rowBetween (globalTop, 1.0f).withTrimmedBottom (margin / 2));
+        //  ...and tell it where the output meter column sits, so the OUTPUT
+        //  knob lines up under the meter it belongs to.
+        globalBar.setMeterWidth (meterW);
+
     }
 }
