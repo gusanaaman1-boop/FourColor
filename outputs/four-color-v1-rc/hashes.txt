@@ -1,10 +1,14 @@
 # FOUR COLOR 1.0.0-rc.1 - artefact hashes (SHA-256)
-# generated 2026-08-11 21:23:01 +0300  -  47 presets, symmetric Output range
+# generated 2026-08-12 17:15:31 +0300
+# 47 presets, symmetric Output range, verified from inside the .pkg
 
-e0ffe85389f0d60650520b514d57efebf972dd433d23582ae5d16237e5ce46f7  artefacts/FourColor-1.0.0-rc.1-macOS.zip
-ee731c5e7bac507d72e88ad6ac93899c97461ea5c1ad4ed00a0088679a18937f  /Users/gussa/Make Music/FourColor/build/FourColor_artefacts/Release/VST3/FourColor.vst3/Contents/MacOS/FourColor
-3e40c29be35621972c1527fe0a391b42bc3dbc0c4a02e82aa04380b59c04d4ed  /Users/gussa/Make Music/FourColor/build/FourColor_artefacts/Release/AU/FourColor.component/Contents/MacOS/FourColor
+57ee63650b6dea67a4aeec5d1e91c3e734391d12193f68242ea5abdee9a27a9e  artefacts/FourColor-1.0.0-rc.1-macOS.zip
 
-# installed copies, to prove they are the same binaries
+# the binaries INSIDE the shipped .pkg
+ee731c5e7bac507d72e88ad6ac93899c97461ea5c1ad4ed00a0088679a18937f     pkg: FourColor-VST3.pkg/Payload/FourColor.vst3/Contents/MacOS/FourColor
+35ca8c21b65701d2c206a0e813ca5326d2fd8dde519d4b4c148ad223ae523458     pkg: FourColor-AU.pkg/Payload/FourColor.component/Contents/MacOS/FourColor
+570208b9faec6555300288d9ee50a41f675de66b871efbb14fb288b8ffe0320e     pkg: FourColor-App.pkg/Payload/FourColor.app/Contents/MacOS/FourColor
+
+# installed on this Mac, taken from that same .pkg
 ee731c5e7bac507d72e88ad6ac93899c97461ea5c1ad4ed00a0088679a18937f  /Users/gussa/Library/Audio/Plug-Ins/VST3/FourColor.vst3/Contents/MacOS/FourColor
-3e40c29be35621972c1527fe0a391b42bc3dbc0c4a02e82aa04380b59c04d4ed  /Users/gussa/Library/Audio/Plug-Ins/Components/FourColor.component/Contents/MacOS/FourColor
+35ca8c21b65701d2c206a0e813ca5326d2fd8dde519d4b4c148ad223ae523458  /Users/gussa/Library/Audio/Plug-Ins/Components/FourColor.component/Contents/MacOS/FourColor

@@ -22,6 +22,21 @@ INSTALL
   Logic:   it rescans Audio Units on launch
 
 ------------------------------------------------------------------------------
+CHECK YOU GOT THE RIGHT BUILD
+------------------------------------------------------------------------------
+
+  Open the plug-in. Under the words FOUR COLOR on the left, in small grey
+  text, it must read:
+
+      1.0.0-rc.1
+
+  And the preset list should hold 47 presets, including the categories
+  Sub, Lead and Parallel.
+
+  If either is different, an older copy is still installed somewhere and the
+  DAW is loading that one instead.
+
+------------------------------------------------------------------------------
 IF macOS REFUSES TO OPEN IT
 ------------------------------------------------------------------------------
 
