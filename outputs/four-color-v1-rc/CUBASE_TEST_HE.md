@@ -97,7 +97,7 @@ CI ירוק ו־pluginval הם **לא** תחליף לזה. הם מוכיחים �
 
 | | |
 | --- | --- |
-| חבילת הבדיקות | 457 בדיקות, 0 נכשלות, ב־Release, Debug ו־ASan/UBSan |
+| חבילת הבדיקות | 473 בדיקות, 0 נכשלות — Release, Debug, ASan/UBSan במק, ו־MSVC בווינדוס |
 | ממצאי sanitizer | 0 |
 | auval | PASS |
 | הקצאות ב־audio thread | 0, על פני 100 סשנים אקראיים |

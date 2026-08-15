@@ -3,7 +3,7 @@
 ```
 STATUS:   RC READY FOR OWNER VALIDATION
 VERSION:  1.0.0-rc.1
-HEAD:     41d4f3f7e8bd2a58bf5a1004b224283da9b35399
+HEAD:     a0cf17a67aef00a5546470c4c9dccd2339698a61
 ```
 
 ## Commits in this round
@@ -28,15 +28,16 @@ HEAD:     41d4f3f7e8bd2a58bf5a1004b224283da9b35399
 
 | | Before | After |
 | --- | --- | --- |
-| checks | 381 | **457** |
+| checks | 381 | **473** |
 | failures | **2** | **0** |
 
 Agreeing across three builds, same numbers in each:
 
 ```
-Release          457 checks, 0 failed
-Debug            457 checks, 0 failed
-ASan + UBSan     457 checks, 0 failed, 0 sanitizer findings
+Release          473 checks, 0 failed
+Debug            473 checks, 0 failed
+ASan + UBSan     473 checks, 0 failed, 0 sanitizer findings
+Windows / MSVC   473 checks, 0 failed  (GitHub Actions, Release and Debug)
 ```
 
 Matrix: 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz against block sizes
@@ -199,10 +200,15 @@ were only found because the package was checked rather than assumed:
 - The p95 frame check was measuring the harness, and a flaky performance
   assertion would likewise have aborted the owner's build.
 
-The shipped package was then extracted clean, configured, built and run end to
-end: 457 checks, 0 failed, exit code 0, VST3 produced. That proves the file set
-is complete and the code compiles — it does **not** prove MSVC accepts it under
-`/WX`, which remains the honest gap.
+That gap is now closed. The repository was made public, which makes hosted
+Windows minutes free, and the code **compiles and passes on MSVC under `/WX`**:
+473 checks, 0 failed, in both Release and Debug, on GitHub's Windows runners.
+A real x86_64 VST3 comes out of every push as a downloadable artefact.
+
+Two checks are reported rather than enforced there, for the same reason the CPU
+budgets are: the runner is headless with software rendering, so its analyzer
+timer reads 23.5 FPS against 29.0 on a desktop, and a frame dirties exactly
+100% of the window because that backend does no partial repaints at all.
 
 ## Preset click
 
@@ -242,7 +248,7 @@ equal-power law peaks at √2 on correlated signals (measured 1.67×).
 | --- | --- |
 | auval | **PASS** |
 | pluginval | **not installed** — needs approval to install |
-| Windows CI | **blocked** — hosted Actions unavailable on this account |
+| Windows CI | **GREEN** — run 31868751879, Release and Debug both pass |
 | Cubase macOS | **not run** |
 | Cubase Windows | **not run** |
 

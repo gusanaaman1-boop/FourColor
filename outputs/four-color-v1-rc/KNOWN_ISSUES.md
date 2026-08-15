@@ -5,29 +5,21 @@ bugs and are not listed here as though they were.
 
 ---
 
-## 1. Windows RC binary does not exist yet
+## 1. ~~Windows RC binary does not exist yet~~ — RESOLVED
 
-**External blocker.**
+A real x86_64 VST3 now builds on GitHub's hosted Windows runners and is
+published as a downloadable artefact on every push. The repository was made
+public, which is what makes those minutes free; while it was private the
+account's jobs were refused on billing and no push could produce a binary.
 
-There is no Windows machine reachable from this workspace and no
-cross-compiler, so the only route to a Windows build is CI — and hosted GitHub
-Actions has been unavailable on this account since 2026-08-06. Pushing would
-only queue a run that cannot execute.
+    473 checks, 0 failed, MSVC Release and Debug
 
-The Windows zip still sitting in `dist/` is from **2026-08-05** and predates
-every change in this round. **It is not the RC and must not be shipped as one.**
+The zip in dist/ holds the compiled plug-in, the standalone, and the installer.
+Nothing has to be built by hand any more.
 
-**What works:** build it directly on the Windows machine —
-
-```
-scripts\build-windows.bat Release
-```
-
-then right-click `packaging\INSTALL-FOUR-COLOR.bat` → Run as administrator.
-The installer finds the built plug-in itself and prints the path it chose
-before it does anything.
-
----
+**Note for the future:** do not point the workflow at a self-hosted runner
+while this repository is public. A pull request runs the workflow, and against
+a runner on your own machine that is a stranger executing code on it.
 
 ## 2. Cubase has not been validated on either platform
 

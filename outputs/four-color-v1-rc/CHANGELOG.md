@@ -2,8 +2,8 @@
 
 ## 1.0.0-rc.1 — 2026-08-09
 
-First release candidate. **457 checks, 0 failed**, agreeing across Release,
-Debug and ASan/UBSan.
+First release candidate. **473 checks, 0 failed**, agreeing across Release,
+Debug, ASan/UBSan on macOS and MSVC Release/Debug on Windows.
 
 ### Fixed
 
@@ -89,13 +89,13 @@ Debug and ASan/UBSan.
 - **Residual visualisation** is deferred to 1.1. The seam exists and is empty.
   Nothing is drawn that is not measured.
 
-- **31 presets, not 60–80.** The expansion waits on the listening pass, because
-  BODY's character changed in this round.
+- **47 presets, not 60–80.** Sixteen signature presets were added, each placing
+  its crossovers for the job. The rest of the expansion waits on the listening
+  pass, because BODY's character changed in this round.
 
 ### Not verified
 
-- Cubase, on either platform.
-- Windows RC binary — hosted CI is unavailable on this account.
+- Cubase, on either platform. This is the only thing left blocking FINAL.
 - pluginval — not installed.
 - Signing and notarization — no credentials.
 

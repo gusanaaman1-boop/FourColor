@@ -7,9 +7,11 @@ empty, not assumed.
 
 ## Done
 
-- [x] 457 checks, 0 failed — Release
-- [x] 457 checks, 0 failed — Debug
-- [x] 457 checks, 0 failed — ASan + UBSan, 0 sanitizer findings
+- [x] 473 checks, 0 failed — Release
+- [x] 473 checks, 0 failed — Debug
+- [x] 473 checks, 0 failed — ASan + UBSan, 0 sanitizer findings
+- [x] 473 checks, 0 failed — Windows MSVC, Release and Debug, on CI
+- [x] A real Windows x86_64 VST3 builds and is published as an artefact
 - [x] The Windows package builds and passes from a clean extraction
 - [x] Sample-rate × block-size matrix: 6 rates × 9 block sizes × mono/stereo
 - [x] 0 audio-thread allocations across 100 randomised sessions
@@ -41,10 +43,6 @@ empty, not assumed.
 
 ## Blocked — external, not work I can do
 
-- [ ] **Windows RC binary.** No Windows machine, no cross-compiler, hosted
-      GitHub Actions unavailable on this account since 2026-08-06. Build with
-      `scripts\build-windows.bat Release`.
-- [ ] **Windows CI green.** Same cause.
 - [ ] **pluginval, strictness 10.** Not installed; installing a third-party
       binary needs your approval. Source:
       `https://github.com/Tracktion/pluginval/releases`
