@@ -103,5 +103,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FourColor-windows-x64
-          path: dist/FourColor-windows-x64/
+          # The CONTENTS, not the folder. GitHub zips whatever this path points
+          # at, and pointing it at the folder buries the installer one level
+          # down - open the zip and there is no .bat in sight, only another
+          # folder to go into. Same layout as the other plug-ins in the line:
+          # the installer is the first thing you see.
+          path: dist/FourColor-windows-x64/*
           if-no-files-found: error
