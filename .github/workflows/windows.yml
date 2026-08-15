@@ -7,24 +7,18 @@
 #
 # WHERE THIS RUNS
 # ---------------
-# On a SELF-HOSTED runner by default: a plain GitHub Actions agent installed on
-# the owner's own Windows PC. That choice is not stylistic.
+# On GitHub's hosted Windows runners, which are free and unmetered because this
+# repository is PUBLIC. That is the whole reason it was made public: hosted
+# minutes are billed on private repositories and this account's jobs had been
+# refused since 2026-08-06, so no push could produce a Windows binary at all.
 #
-#   * GitHub's hosted runners are metered on private repositories, and this
-#     account's jobs have been refused since 2026-08-06 - they fail in about
-#     three seconds with "recent account payments have failed or your spending
-#     limit needs to be increased". Every push since has produced a red run
-#     that never compiled a line.
-#   * Hosted minutes are free only on PUBLIC repositories, and this is a
-#     commercial product whose source stays closed.
-#   * A self-hosted runner is free, needs no card, and keeps the repository
-#     private. The Windows machine already exists and already has the toolchain
-#     the build needs.
-#
-# See docs/WINDOWS-RUNNER-SETUP.md for the one-time registration.
-#
-# To use GitHub's hosted runners instead - only worth trying once billing is
-# resolved - run the workflow manually and pick "github-hosted".
+# It briefly targeted a self-hosted runner on the owner's own PC, which was the
+# only free route while the repository was private. That is now removed on
+# purpose and MUST NOT come back while this repository is public: a public repo
+# lets anyone open a pull request, and a pull request runs the workflow. Against
+# a self-hosted runner that means a stranger executing arbitrary code on the
+# owner's Windows machine. Hosted runners are disposable VMs, so the same pull
+# request can only burn a few minutes of somebody else's hardware.
 #
 # Everything is pinned: an unpinned runner image or JUCE branch turns a red
 # build into "something upstream moved", which is the least useful failure.
@@ -36,25 +30,15 @@ on:
     branches: [main, master]
   pull_request:
   workflow_dispatch:
-    inputs:
-      runner:
-        description: Where to build
-        type: choice
-        default: self-hosted
-        options: [self-hosted, github-hosted]
 
-# A self-hosted runner is one machine. Without this, every push while it is
-# offline queues another job and they all stampede when it comes back.
+# One build per branch. A newer push makes the one in flight pointless.
 concurrency:
   group: windows-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    runs-on: >-
-      ${{ github.event.inputs.runner == 'github-hosted'
-          && 'windows-2022'
-          || fromJSON('["self-hosted","Windows","X64"]') }}
+    runs-on: windows-2022          # pinned image, not windows-latest
 
     strategy:
       fail-fast: false
@@ -87,12 +71,12 @@ jobs:
       - name: Run the DSP and state suite
         shell: cmd
         env:
-          # A self-hosted runner is somebody's desktop: it may be compiling,
-          # rendering or playing music while this runs. The CPU-budget checks
-          # measure the machine as much as the plug-in - the same binary has
-          # reported 19.8x realtime on a quiet box and 4.1x on a busy one - so
-          # they are reported here and enforced on a quiet machine before
-          # release. Every correctness check stays enforced.
+          # A hosted runner is a shared two-core VM with software rendering. Its
+          # CPU numbers say as little about the shipped plug-in as an
+          # unoptimised build's do - the same binary has reported 19.8x realtime
+          # on a quiet machine and 4.1x on a contended one - so the CPU budgets
+          # are reported here and enforced on a quiet machine before release.
+          # Every correctness check stays enforced.
           FOURCOLOR_SKIP_PERF: 1
         # No continue-on-error. It was here because one acceptance check was
         # knowingly red, which meant a genuine regression could not turn this
